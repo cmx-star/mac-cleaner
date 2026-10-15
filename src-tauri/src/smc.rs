@@ -19,6 +19,7 @@ extern "C" {
     fn IOServiceMatching(name: *const i8) -> *mut c_void;
     fn IOServiceOpen(service: u32, owning_task: u32, conn_type: u32, connect: *mut u32) -> i32;
     fn IOObjectRelease(obj: u32) -> i32;
+    #[allow(dead_code)]
     fn IOServiceClose(connect: u32) -> i32;
     fn IOConnectCallMethod(
         connect: u32,
@@ -53,6 +54,7 @@ const SMC_STRUCT_SIZE: usize = 80;
 const OFF_KEY: usize = 0; // key，小端 u32
 const OFF_KEYINFO_SIZE: usize = 28; // keyInfo.dataSize，小端 u32
 const OFF_KEYINFO_TYPE: usize = 32; // keyInfo.dataType，小端 u32
+#[allow(dead_code)]
 const OFF_RESULT: usize = 36; // result 字节
 const OFF_DATA8: usize = 42; // 子命令字节
 const OFF_BYTES: usize = 48; // 数据载荷，32 字节
@@ -103,6 +105,7 @@ impl SmcParamStruct {
         p.iter().rev().map(|b| *b as char).collect()
     }
 
+    #[allow(dead_code)]
     fn result(&self) -> u8 {
         self.raw[OFF_RESULT]
     }
@@ -407,61 +410,182 @@ pub enum FanMode {
     Manual(u32),
 }
 
-/// 设置风扇模式。走打包的 fanctl 助手（setuid root）执行，与 mac-status 方案一致。
-/// 助手未安装时返回带指引的错误，不静默失败。
-pub async fn set_fan_mode(mode: FanMode) -> Result<(), String> {
-    let helper = helper_path().ok_or_else(|| {
-        "风扇控制助手（fanctl）未安装。安装方式：\
-         sudo chown root:wheel fanctl && sudo chmod 4755 fanctl"
-    })?;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
-    let output = match mode {
-        FanMode::Auto => {
-            tokio::process::Command::new(&helper).arg("--auto").output().await
-        }
-        FanMode::Manual(rpm) => {
-            // 防御：限制在合法范围（mac-status 用 0..=8000），不把任意值写进 SMC。
-            let rpm = rpm.clamp(0, 8000);
-            tokio::process::Command::new(&helper)
-                .arg("--set")
-                .arg(rpm.to_string())
-                .output()
-                .await
-        }
-    };
+/// 系统特权助手首选安装路径（macOS 标准特权辅助工具目录）。
+pub const PRIVILEGED_HELPER_PATH: &str = "/Library/PrivilegedHelperTools/fit.talpa.fanctl";
+/// 系统特权助手备选安装路径（应用支持目录）。
+pub const APP_SUPPORT_HELPER_PATH: &str = "/Library/Application Support/Talpa/fanctl";
 
-    let output = output.map_err(|e| format!("执行 fanctl 失败：{e}"))?;
-    if output.status.success() {
-        Ok(())
+/// 检查给定路径是否存在，并且拥有有效且受信任的 setuid root 权限（所有者 root，权限 4755）。
+pub fn is_valid_setuid_root(path: &Path) -> bool {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let is_root = meta.uid() == 0;
+        let is_suid = (meta.mode() & 0o4000) != 0;
+        let is_executable = (meta.mode() & 0o111) != 0;
+        is_root && is_suid && is_executable
     } else {
-        Err(format!(
-            "fanctl 退出码 {:?}：{}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ))
+        false
     }
 }
 
-/// 定位 fanctl 助手：App Resources 优先，开发模式找同目录。
-fn helper_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    // .app/Contents/MacOS/<exe> → ../Resources/fanctl。
-    let resources = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("Resources/fanctl"));
-    if let Some(p) = resources {
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    let sibling = exe.parent().map(|p| p.join("fanctl"));
-    if let Some(p) = sibling {
-        if p.exists() {
+/// 查找系统中已安装且具备 setuid root 权限的免密助手路径。
+pub fn installed_privileged_helper() -> Option<PathBuf> {
+    for candidate in [PRIVILEGED_HELPER_PATH, APP_SUPPORT_HELPER_PATH] {
+        let p = PathBuf::from(candidate);
+        if is_valid_setuid_root(&p) {
             return Some(p);
         }
     }
     None
+}
+
+/// 查找源二进制文件（打包在 Resources 下，或开发环境 target 目录下）。
+pub fn find_source_helper() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        // 1. .app/Contents/MacOS/<exe> → ../Resources/fanctl
+        let resources = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("Resources/fanctl"));
+        if let Some(p) = resources {
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        // 2. 同级可执行目录：target/debug/fanctl 或 target/release/fanctl
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("fanctl");
+            if sibling.exists() {
+                return Some(sibling);
+            }
+        }
+    }
+
+    // 3. 兜底常见编译与安装路径
+    for candidate in [
+        "src-tauri/target/debug/fanctl",
+        "src-tauri/target/release/fanctl",
+        "target/debug/fanctl",
+        "target/release/fanctl",
+        "/usr/local/bin/fanctl",
+    ] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+/// 获取当前最佳可用的 fanctl 助手路径：
+/// 1. 若系统目录已安装免密特权助手，优先返回系统免密路径；
+/// 2. 否则返回本地/打包的源二进制路径，供提权安装使用。
+pub fn helper_path() -> Option<PathBuf> {
+    installed_privileged_helper().or_else(find_source_helper)
+}
+
+/// 设置风扇模式。
+///
+/// 方案设计（一次授权，永久免密）：
+/// 1. 优先以普通身份直接调用已安装的特权助手 `/Library/PrivilegedHelperTools/fit.talpa.fanctl`；
+///    因为助手拥有 setuid root（4755 root:wheel），内核直接赋予 root 权限完成 SMC 写入，
+///    耗时仅数毫秒，不弹窗、不输密码。
+/// 2. 若尚未安装特权助手或权限失效（如首次使用），通过 macOS 系统授权窗口（osascript with administrator privileges）
+///    一次性将助手安装至系统特权工具目录并配置 4755 权限，同时立即生效当前调节。
+/// 3. 安装成功后，后续所有调节均直接命中第 1 步免密路径。
+pub async fn set_fan_mode(mode: FanMode) -> Result<(), String> {
+    let args: Vec<String> = match mode {
+        FanMode::Auto => vec!["--auto".to_string()],
+        FanMode::Manual(rpm) => {
+            let rpm = rpm.clamp(0, 8000);
+            vec!["--set".to_string(), rpm.to_string()]
+        }
+    };
+
+    // 1. 免密优先（Fast Path）：若已安装系统特权助手，直接以普通身份启动
+    if let Some(helper) = installed_privileged_helper() {
+        let output = tokio::process::Command::new(&helper)
+            .args(&args)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // 若不是特权不足导致的退出（如参数错误等），直接报错返回
+                if out.status.code() != Some(2) && !stderr.contains("root") && !stderr.contains("SMC") {
+                    return Err(format!("fanctl 退出码 {:?}：{stderr}", out.status.code()));
+                }
+                // 若是特权失效，则继续走下方流程重新安装修复
+            }
+            Err(_) => {
+                // 启动失败，继续走下方安装流程
+            }
+        }
+    }
+
+    // 2. 检查源二进制是否在当前环境下直接可用
+    if let Some(helper) = find_source_helper() {
+        if is_valid_setuid_root(&helper) {
+            if let Ok(out) = tokio::process::Command::new(&helper)
+                .args(&args)
+                .output()
+                .await
+            {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // 3. 首次安装/修复特权助手：通过系统授权弹窗，一次性安装到系统特权目录（后续无需再输入密码）
+    let source = find_source_helper().ok_or_else(|| {
+        "风扇控制助手（fanctl）未找到。请先编译或安装 fanctl。".to_string()
+    })?;
+
+    let source_canonical = std::fs::canonicalize(&source).unwrap_or(source);
+    let src_str = source_canonical.to_string_lossy();
+    let target_dir = "/Library/PrivilegedHelperTools";
+    let target_path = PRIVILEGED_HELPER_PATH;
+    let args_str = args.join(" ");
+
+    // 安装脚本：
+    // 创建目录 -> 复制助手二进制 -> 赋予 root:wheel 与 setuid 4755 -> 立即以 root 执行本次调节
+    let shell_script = format!(
+        "mkdir -p \"{target_dir}\" && \
+         cp -f \"{src_str}\" \"{target_path}\" && \
+         chown root:wheel \"{target_path}\" && \
+         chmod 4755 \"{target_path}\" && \
+         \"{target_path}\" {args_str}"
+    );
+
+    let osascript_arg = format!(
+        "do shell script \"{}\" with administrator privileges with prompt \"Talpa 需要安装风扇控制助手以实现免密调节（仅需授权一次）：\"",
+        shell_script.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+
+    let auth_output = tokio::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&osascript_arg)
+        .output()
+        .await
+        .map_err(|e| format!("唤起管理员授权失败：{e}"))?;
+
+    if auth_output.status.success() {
+        Ok(())
+    } else {
+        let err_msg = String::from_utf8_lossy(&auth_output.stderr).trim().to_string();
+        if err_msg.contains("User canceled") || err_msg.contains("-128") {
+            Err("已取消管理员授权，未更改风扇转速".to_string())
+        } else {
+            Err(format!("风扇助手安装授权失败：{err_msg}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -584,5 +708,17 @@ mod tests {
                 Err(e) => println!("{key}: 不可读（{e}）"),
             }
         }
+    }
+
+    #[test]
+    fn helper_detection_and_suid_validation() {
+        // 普通非 setuid 文件的校验
+        assert!(!is_valid_setuid_root(std::path::Path::new("/bin/ls")));
+        assert!(!is_valid_setuid_root(std::path::Path::new("/non_existent_file")));
+
+        // 在开发环境能定位到 source helper
+        let src = find_source_helper();
+        assert!(src.is_some(), "开发环境中应能定位到 fanctl 源文件");
+        assert!(helper_path().is_some());
     }
 }

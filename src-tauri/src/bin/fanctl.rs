@@ -11,6 +11,20 @@
 //! 非 root 运行时 SMC 写入会失败，助手以非零码退出，不静默假装成功。
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" {
+            fn setuid(uid: u32) -> i32;
+            fn setgid(gid: u32) -> i32;
+            fn geteuid() -> u32;
+        }
+        let euid = geteuid();
+        if euid == 0 {
+            let _ = setgid(0);
+            let _ = setuid(0);
+        }
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
