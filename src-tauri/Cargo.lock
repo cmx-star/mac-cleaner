@@ -1826,21 +1826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mole-desktop"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tokio",
- "walkdir",
-]
-
-[[package]]
 name = "muda"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3104,6 +3089,21 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "talpa-desktop"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tokio",
+ "walkdir",
 ]
 
 [[package]]

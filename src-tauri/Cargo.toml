@@ -1,13 +1,14 @@
 [package]
-name = "mole-desktop"
+name = "talpa-desktop"
 version = "0.1.0"
-description = "Mole 桌面版 - 基于 Mole CLI 的 Mac 清理与维护界面"
-authors = ["Mole Desktop Contributors"]
+description = "Talpa 桌面版 - 基于 Mole CLI 的 Mac 清理与维护界面"
+authors = ["Talpa Desktop Contributors"]
 edition = "2021"
 rust-version = "1.77"
+default-run = "talpa-desktop"
 
 [lib]
-name = "mole_desktop_lib"
+name = "talpa_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
