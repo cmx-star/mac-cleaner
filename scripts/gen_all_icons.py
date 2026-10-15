@@ -3,20 +3,28 @@ import subprocess, sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from gen_icon import render
 
+import shutil
+
 ICONSET = "src-tauri/icons/icon.iconset"
-SIZES = {
-    16: "icon_16x16.png",
-    32: "icon_16x16@2x.png",
-    32+0: "icon_32x32.png",
-    64: "icon_32x32@2x.png",
-    128: "icon_128x128.png",
-    256: "icon_128x128@2x.png",
-    256+0: "icon_256x256.png",
-    512: "icon_256x256@2x.png",
-    512+0: "icon_512x512.png",
-}
+SIZES = [
+    (16, "icon_16x16.png"),
+    (32, "icon_16x16@2x.png"),
+    (32, "icon_32x32.png"),
+    (64, "icon_32x32@2x.png"),
+    (128, "icon_128x128.png"),
+    (256, "icon_128x128@2x.png"),
+    (256, "icon_256x256.png"),
+    (512, "icon_256x256@2x.png"),
+    (512, "icon_512x512.png"),
+    (1024, "icon_512x512@2x.png"),
+]
+
+# 清理旧图标，避免残留
+if os.path.exists(ICONSET):
+    shutil.rmtree(ICONSET)
 os.makedirs(ICONSET, exist_ok=True)
-for sz, name in SIZES.items():
+
+for sz, name in SIZES:
     render(sz).save(os.path.join(ICONSET, name))
     print("png", sz, name)
 
@@ -24,6 +32,7 @@ for sz, name in SIZES.items():
 render(32).save("src-tauri/icons/32x32.png")
 render(128).save("src-tauri/icons/128x128.png")
 render(256).save("src-tauri/icons/128x128@2x.png")
+render(512).save("src-tauri/icons/icon.png")
 
 # icns：用系统 iconutil
 r = subprocess.run(["iconutil", "-c", "icns", ICONSET, "-o", "src-tauri/icons/icon.icns"],

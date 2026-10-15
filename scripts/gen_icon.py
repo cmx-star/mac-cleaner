@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-"""从 icon.svg 思路用 Pillow 直接栅格化 Mole 应用图标（无 cairo 依赖）。"""
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import math, sys
 
 BLUE = (91, 163, 245)
@@ -17,7 +15,7 @@ def lerp(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def render(size: int) -> Image.Image:
+def render_squircle(size: int) -> Image.Image:
     S = 4
     px = size * S
     sc = px / 1024.0
@@ -105,6 +103,39 @@ def render(size: int) -> Image.Image:
                         radius=radius, outline=BORDER + (255,), width=int(4 * sc))
 
     return img.resize((size, size), Image.LANCZOS)
+
+
+def render(size: int, is_macos_framed: bool = True) -> Image.Image:
+    """按 Apple macOS HIG 规范生成应用图标（824/1024 比例居中 + 原生柔和投影）。"""
+    if not is_macos_framed or size < 16:
+        return render_squircle(size)
+
+    # Apple HIG 规范：1024 像素网格中圆角矩形尺寸为 824 (比例 0.805)
+    scale = 0.805
+    inner_size = int(round(size * scale))
+    if inner_size % 2 != size % 2:
+        inner_size += 1
+    offset = (size - inner_size) // 2
+
+    inner_img = render_squircle(inner_size)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+
+    if size >= 32:
+        shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow)
+        y_shift = max(1, int(round(size * 0.018)))
+        blur = max(1, int(round(size * 0.024)))
+        corner_r = int(round(inner_size * 0.224))
+        sd.rounded_rectangle(
+            [offset, offset + y_shift, offset + inner_size - 1, offset + y_shift + inner_size - 1],
+            radius=corner_r,
+            fill=(0, 0, 0, 95),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(blur))
+        canvas.paste(shadow, (0, 0), shadow)
+
+    canvas.paste(inner_img, (offset, offset), inner_img)
+    return canvas
 
 
 if __name__ == "__main__":
