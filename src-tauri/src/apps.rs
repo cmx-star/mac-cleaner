@@ -331,6 +331,14 @@ pub fn list_apps() -> Vec<App> {
     apps
 }
 
+/// 读取单个应用的图标（PNG base64）。按 bundle_id 查找。
+pub fn app_icon(bundle_id: &str) -> Option<String> {
+    let apps = list_apps();
+    let app = apps.into_iter().find(|a| a.bundle_id == bundle_id)?;
+    let icons = read_icons_base64(&[app.path.clone()]);
+    icons.get(&app.path).cloned()
+}
+
 /// 读取用户应用数据目录的占用，用于展示「应用散落在系统各处的文件」。
 ///
 /// 对应文章里那个例子：Claude 本体 781MB，`~/Library/Application Support/claude`
@@ -391,6 +399,214 @@ pub struct AppDataPath {
     pub size: u64,
     pub size_display: String,
     pub protection_reason: Option<String>,
+}
+
+/// 卸载应用（纯 Rust 实现，不依赖外部 CLI）。
+///
+/// 1. 查找目标应用（按名称、bundle_id 或 .app 路径精确或忽略大小写匹配）；
+/// 2. 校验系统保护规则，拒绝删除系统核心或受保护应用；
+/// 3. 若应用正在运行，通知应用退出；
+/// 4. 收集应用包本体以及散落在 ~/Library 中的全部关联数据目录；
+/// 5. 移入废纸篓（dry_run 为 false 时调用 `trash::move_to_trash`）；
+/// 6. 记录操作历史日志；
+/// 7. 格式化输出人类可读的统计信息，返回 `CommandOutput`。
+pub async fn uninstall_app(
+    target: &str,
+    dry_run: bool,
+) -> Result<crate::cli::CommandOutput, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("应用名称不能为空".to_string());
+    }
+
+    // 快速路径：先直接检查常见路径下的 .app，避免全量读图标
+    let mut candidate_paths = vec![PathBuf::from(target)];
+    if !target.ends_with(".app") {
+        candidate_paths.push(PathBuf::from(format!("/Applications/{target}.app")));
+        candidate_paths.push(PathBuf::from(format!("/System/Applications/{target}.app")));
+        candidate_paths.push(PathBuf::from(format!("/System/Library/CoreServices/{target}.app")));
+        if let Some(home) = crate::safety::home_dir() {
+            candidate_paths.push(PathBuf::from(format!("{home}/Applications/{target}.app")));
+        }
+    }
+
+    let app = if let Some(path) = candidate_paths.into_iter().find(|p| p.exists() && p.is_dir()) {
+        let bundle_id = read_bundle_id(&path);
+        let size = bundle_size(&path);
+        let (protected, reason) = is_protected(&bundle_id, &path.to_string_lossy());
+        let version = read_version(&path);
+        let last_used = last_used_days(&path);
+        Some(App {
+            name: path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            bundle_id,
+            source: "App".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            size,
+            size_display: human_bytes(size),
+            version,
+            last_used_days_ago: last_used,
+            icon_png_base64: None,
+            protected,
+            protection_reason: reason,
+        })
+    } else {
+        // 回退路径：按 bundle_id 或非标路径从全量应用列表中查找
+        let all_apps = list_apps();
+        all_apps
+            .into_iter()
+            .find(|a| {
+                a.name.eq_ignore_ascii_case(target)
+                    || a.bundle_id.eq_ignore_ascii_case(target)
+                    || a.path == target
+                    || a.name
+                        .trim_end_matches(".app")
+                        .eq_ignore_ascii_case(target.trim_end_matches(".app"))
+            })
+    };
+
+    let app = app.ok_or_else(|| format!("未找到应用：{target}"))?;
+
+    if app.protected {
+        let reason = app
+            .protection_reason
+            .unwrap_or_else(|| "系统受保护应用".to_string());
+        return Err(format!("拒绝卸载系统受保护应用「{}」：{}", app.name, reason));
+    }
+
+    let mut data_items = app_data_size(&app.bundle_id);
+
+    // 补充：根据应用名在常见数据目录中查找（部分第三方软件使用软件名建立文件夹）
+    if let Some(home) = crate::safety::home_dir() {
+        let name_candidates = [
+            format!("{home}/Library/Application Support/{}", app.name),
+            format!("{home}/Library/Caches/{}", app.name),
+            format!("{home}/Library/Logs/{}", app.name),
+        ];
+        for cand in name_candidates {
+            if data_items.iter().any(|d| d.path == cand) {
+                continue;
+            }
+            let p = PathBuf::from(&cand);
+            if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                let size = if meta.file_type().is_dir() {
+                    bundle_size(&p)
+                } else {
+                    meta.len()
+                };
+                if size > 0 {
+                    let protection = crate::safety::classify(&p, &[]);
+                    data_items.push(AppDataPath {
+                        path: cand,
+                        size,
+                        size_display: human_bytes(size),
+                        protection_reason: protection.reason().map(str::to_string),
+                    });
+                }
+            }
+        }
+    }
+
+    // 待移入废纸篓的项目清单：app 本体 + 关联散落数据文件
+    let mut paths_to_trash: Vec<String> = vec![app.path.clone()];
+    for item in &data_items {
+        paths_to_trash.push(item.path.clone());
+    }
+
+    let total_bytes: u64 = app.size + data_items.iter().map(|d| d.size).sum::<u64>();
+    let total_size_str = human_bytes(total_bytes);
+
+    if dry_run {
+        let mut stdout = format!(
+            "【模拟运行】准备卸载应用：{} ({})\n\n",
+            app.name, app.bundle_id
+        );
+        stdout.push_str(&format!(
+            "将移入废纸篓的项目（共 {} 项，预计释放空间 {}）：\n",
+            paths_to_trash.len(),
+            total_size_str
+        ));
+        stdout.push_str(&format!("  • {} ({})\n", app.path, app.size_display));
+        for item in &data_items {
+            stdout.push_str(&format!("  • {} ({})\n", item.path, item.size_display));
+        }
+        stdout.push_str("\n提示：当前为模拟预览模式，未对系统做任何改动。\n");
+
+        return Ok(crate::cli::CommandOutput {
+            success: true,
+            exit_code: Some(0),
+            stdout,
+            stderr: String::new(),
+        });
+    }
+
+    // 真实卸载时：若应用正在运行，尝试通知应用退出（500ms 超时，不阻塞流程）
+    if !app.bundle_id.is_empty() {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::process::Command::new("osascript")
+                .arg("-e")
+                .arg(format!("tell application id \"{}\" to quit", app.bundle_id))
+                .output(),
+        )
+        .await;
+    }
+
+    // 真实卸载：调用 trash::move_to_trash
+    let outcomes = crate::trash::move_to_trash(&paths_to_trash);
+
+    let mut success_count = 0;
+    let mut failed_count = 0;
+    let mut freed_bytes: u64 = 0;
+
+    let mut stdout = format!("已卸载应用：{} ({})\n\n移入废纸篓项目：\n", app.name, app.bundle_id);
+    let mut stderr = String::new();
+
+    for outcome in &outcomes {
+        let size_str = if outcome.path == app.path {
+            freed_bytes += app.size;
+            app.size_display.clone()
+        } else if let Some(d) = data_items.iter().find(|d| d.path == outcome.path) {
+            freed_bytes += d.size;
+            d.size_display.clone()
+        } else {
+            String::new()
+        };
+
+        if outcome.ok {
+            success_count += 1;
+            stdout.push_str(&format!("  ✓ {} ({})\n", outcome.path, size_str));
+            crate::history::log_operation("uninstall", "TRASHED", &outcome.path, Some(&size_str));
+        } else {
+            failed_count += 1;
+            let err = outcome.error.as_deref().unwrap_or("未知原因");
+            stdout.push_str(&format!("  ✗ {}（失败：{}）\n", outcome.path, err));
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str(&format!("{}: {}", outcome.path, err));
+            crate::history::log_operation("uninstall", "FAILED", &outcome.path, Some(err));
+        }
+    }
+
+    stdout.push_str(&format!(
+        "\n共移入 {} 个项目（{} 失败），释放空间约 {}。\n",
+        success_count,
+        failed_count,
+        human_bytes(freed_bytes)
+    ));
+    stdout.push_str("所有被删除的项目已安全送至系统废纸篓，可在访达中随时放回原处。");
+
+    let success = success_count > 0 && failed_count == 0;
+    Ok(crate::cli::CommandOutput {
+        success,
+        exit_code: if success { Some(0) } else { Some(1) },
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -482,5 +698,51 @@ mod tests {
                 assert!(days < 365 * 20, "最后使用时间不应超过 20 年：{days}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn uninstall_rejects_empty_and_nonexistent() {
+        assert!(uninstall_app("", false).await.is_err());
+        assert!(uninstall_app("   ", true).await.is_err());
+        assert!(uninstall_app("com.definitely.not.exist.fakeapp", true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn uninstall_protects_system_apps() {
+        // Finder 和 Safari 均受保护，必须拒绝卸载
+        let res = uninstall_app("Finder", true).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("受保护"));
+
+        let res = uninstall_app("Safari", true).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn uninstall_dry_run_for_installed_app() {
+        let app_path = std::env::temp_dir().join("TalpaMockTest.app");
+        let contents_dir = app_path.join("Contents");
+        let _ = std::fs::create_dir_all(&contents_dir);
+        let plist_path = contents_dir.join("Info.plist");
+        let plist_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.talpa.mocktest</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+</dict>
+</plist>"#;
+        let _ = std::fs::write(&plist_path, plist_content);
+
+        let res = uninstall_app(&app_path.to_string_lossy(), true).await;
+        let _ = std::fs::remove_dir_all(&app_path);
+
+        assert!(res.is_ok(), "dry_run 应该成功：{res:?}");
+        let out = res.unwrap();
+        assert!(out.success);
+        assert!(out.stdout.contains("模拟运行") || out.stdout.contains("准备卸载"));
+        assert!(out.stdout.contains("TalpaMockTest"));
     }
 }
