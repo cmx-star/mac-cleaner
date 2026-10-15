@@ -10,6 +10,7 @@ pub mod history;
 pub mod safety;
 pub mod scan;
 pub mod smc;
+pub mod startup;
 pub mod status;
 
 use commands::Collector;
@@ -32,11 +33,11 @@ pub fn run() {
             commands::run_uninstall,
             commands::run_optimize,
             commands::read_whitelist,
+            commands::home_dir,
+            commands::startup_items,
+            commands::set_startup_item,
+            commands::open_login_items_settings,
             commands::classify_path,
-            commands::fan_status,
-            commands::set_fan,
-            commands::app_icon,
-            commands::top_processes,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Talpa 桌面版失败");

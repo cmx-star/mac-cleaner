@@ -131,88 +131,38 @@ pub async fn read_whitelist() -> Result<Vec<String>, String> {
         .map_err(|e| format!("读取保护名单异常：{e}"))
 }
 
-/// 读取全部风扇。
+/// 用户主目录，分析页用它作为输入框的默认路径。
 #[tauri::command]
-pub async fn fan_status() -> Result<Vec<crate::smc::Fan>, String> {
-    tauri::async_runtime::spawn_blocking(crate::smc::fans)
+pub fn home_dir() -> Option<String> {
+    crate::safety::home_dir()
+}
+
+/// 读取启动项与后台服务。
+#[tauri::command]
+pub async fn startup_items() -> Result<Vec<crate::startup::StartupItem>, String> {
+    tauri::async_runtime::spawn_blocking(crate::startup::list_startup_items)
         .await
-        .map_err(|e| format!("风扇读取异常：{e}"))
+        .map_err(|e| format!("读取启动项异常：{e}"))
 }
 
-/// 设置风扇模式（自动 / 手动转速）。需要已安装 setuid 的 fanctl 助手。
+/// 启用或停用一条启动项。
 #[tauri::command]
-pub async fn set_fan(mode: crate::smc::FanMode) -> Result<(), String> {
-    crate::smc::set_fan_mode(mode).await
+pub async fn set_startup_item(
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::startup::set_startup_item_enabled(&id, enabled)
+    })
+    .await
+    .map_err(|e| format!("切换启动项异常：{e}"))?
 }
 
-/// 进程列表条目。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub name: String,
-    /// 物理内存占用（字节）。
-    pub memory: u64,
-    /// CPU 使用率（自上次刷新以来的均值）。
-    pub cpu_percent: f32,
-    /// 进程可执行文件路径，用于反查所属 App。
-    pub exe: Option<String>,
-    /// 所属 .app bundle 路径（能从 exe 反查到才有）。
-    pub bundle_path: Option<String>,
-}
-
-/// 从可执行文件路径反查所属 `.app` bundle。
-///
-/// 形如 `/Applications/Foo.app/Contents/MacOS/Foo` → `/Applications/Foo.app`。
-/// 进程不在任何 bundle 内（如系统守护进程、CLI 工具）时返回 None，
-/// 界面用首字母占位。
-fn bundle_from_exe(exe: &str) -> Option<String> {
-    let idx = exe.find(".app/")?;
-    let bundle = &exe[..idx + 4];
-    // 只接受绝对路径，避免把相对路径当 bundle。
-    if bundle.starts_with('/') {
-        Some(bundle.to_string())
-    } else {
-        None
-    }
-}
-
-/// 列出资源占用最高的进程。
+/// 打开系统设置的「登录项与扩展」面板，用于处理本应用改不了的系统托管项。
 #[tauri::command]
-pub async fn top_processes(
-    collector: State<'_, Collector>,
-    limit: Option<usize>,
-) -> Result<Vec<ProcessInfo>, String> {
-    let limit = limit.unwrap_or(12).clamp(1, 50);
-
-    let mut sys = collector
-        .system
-        .lock()
-        .map_err(|_| "状态采集器被占用".to_string())?;
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-
-    let mut procs: Vec<ProcessInfo> = sys
-        .processes()
-        .values()
-        .map(|p| {
-            let exe = p
-                .exe()
-                .map(|e| e.to_string_lossy().into_owned());
-            let bundle_path = exe.as_deref().and_then(bundle_from_exe);
-            ProcessInfo {
-                pid: p.pid().as_u32(),
-                name: p.name().to_string_lossy().into_owned(),
-                memory: p.memory(),
-                cpu_percent: p.cpu_usage(),
-                exe,
-                bundle_path,
-            }
-        })
-        .collect();
-
-    // 先按内存排，再按 CPU 排，界面各取所需；只保留非系统空闲项。
-    procs.retain(|p| p.memory > 0);
-    procs.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
-    procs.truncate(limit);
-
-    Ok(procs)
+pub async fn open_login_items_settings() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(crate::startup::open_login_items_settings)
+        .await
+        .map_err(|e| format!("打开系统设置异常：{e}"))?
 }
+

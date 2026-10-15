@@ -10,6 +10,7 @@ import type {
   ProcessInfo,
   CommandOutput,
   History,
+  StartupItem,
   Protection,
   ScanResult,
   Snapshot,
@@ -37,6 +38,26 @@ export function appData(bundleId: string): Promise<AppDataPath[]> {
 
 export function readHistory(limit?: number): Promise<History> {
   return invoke("read_history", { limit: limit ?? null });
+}
+
+/** 用户主目录，用作分析页输入框的默认值。 */
+export function homeDir(): Promise<string | null> {
+  return invoke("home_dir");
+}
+
+/** 启动项与后台服务列表。 */
+export function startupItems(): Promise<StartupItem[]> {
+  return invoke("startup_items");
+}
+
+/** 启用或停用一条启动项。 */
+export function setStartupItem(id: string, enabled: boolean): Promise<void> {
+  return invoke("set_startup_item", { id, enabled });
+}
+
+/** 打开系统设置的「登录项与扩展」面板。 */
+export function openLoginItemsSettings(): Promise<void> {
+  return invoke("open_login_items_settings");
 }
 
 export function cliStatus(): Promise<CliLocation> {
