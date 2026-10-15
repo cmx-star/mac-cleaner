@@ -21,11 +21,28 @@ pub struct Snapshot {
     pub health_score: u32,
     pub health_score_msg: String,
     pub cpu: Cpu,
+    pub gpu: Gpu,
     pub memory: Memory,
     pub disks: Vec<Disk>,
     pub disk_io: DiskIo,
     pub network: Vec<NetInterface>,
+    pub network_detail: NetworkDetail,
     pub thermal: Thermal,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Gpu {
+    pub usage: f32,
+    pub memory_used: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkDetail {
+    pub ipv4: String,
+    pub proxy: String,
+    pub interface_name: String,
+    pub kind: String,
+    pub low_latency_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,9 +202,14 @@ fn is_external_mount(mount: &str) -> bool {
 
 /// 采集一次完整快照。
 ///
-/// CPU 使用率需要两次采样之间的差值，因此调用方应保持 `System` 实例存活
-/// 并复用；这里为一次性采集，使用 `sysinfo` 的刷新语义并在内部做最小等待。
-pub fn collect(system: &mut System, disks: &Disks, networks: &Networks) -> Snapshot {
+/// CPU 使用率与网络速率需要两次采样之间的差值与时长，因此调用方应保持 `System`
+/// 和 `Networks` 实例存活并复用；`elapsed_secs` 为两次采样之间的实际间隔秒数。
+pub fn collect(
+    system: &mut System,
+    disks: &Disks,
+    networks: &Networks,
+    elapsed_secs: f64,
+) -> Snapshot {
     system.refresh_cpu_usage();
     system.refresh_memory();
 
@@ -235,22 +257,67 @@ pub fn collect(system: &mut System, disks: &Disks, networks: &Networks) -> Snaps
         .find(|d| d.mount == "/")
         .or_else(|| disk_list.first());
 
-    let net_list: Vec<NetInterface> = networks
+    let elapsed = if elapsed_secs > 0.05 { elapsed_secs } else { 0.6 };
+
+    let mut net_list: Vec<NetInterface> = networks
         .list()
         .iter()
-        .map(|(name, data)| NetInterface {
-            name: name.clone(),
-            rx_rate_mbs: data.received() as f64 / 1024.0 / 1024.0,
-            tx_rate_mbs: data.transmitted() as f64 / 1024.0 / 1024.0,
+        .map(|(name, data)| {
+            let rx = (data.received() as f64 / elapsed) / (1024.0 * 1024.0);
+            let tx = (data.transmitted() as f64 / elapsed) / (1024.0 * 1024.0);
+            NetInterface {
+                name: name.clone(),
+                rx_rate_mbs: rx,
+                tx_rate_mbs: tx,
+            }
         })
         .collect();
 
+    // 智能排序：物理网卡（如 en0/en1/wl）优先于虚拟接口（如 lo, stf, gif, utun），
+    // 并且当前有实际流量的接口排在最前，避免选到无流量的 stf0/lo0。
+    net_list.sort_by(|a, b| {
+        let score = |n: &NetInterface| -> f64 {
+            let name = n.name.as_str();
+            let is_physical = name.starts_with("en") || name.starts_with("wl");
+            let is_virtual = name.starts_with("lo")
+                || name.starts_with("stf")
+                || name.starts_with("gif")
+                || name.starts_with("utun")
+                || name.starts_with("anpi")
+                || name.starts_with("awdl")
+                || name.starts_with("llw")
+                || name.starts_with("bridge");
+            let traffic = n.rx_rate_mbs + n.tx_rate_mbs;
+
+            if is_physical && traffic > 0.0001 {
+                10000.0 + traffic
+            } else if !is_virtual && traffic > 0.0001 {
+                5000.0 + traffic
+            } else if is_physical {
+                let num: f64 = name.trim_start_matches("en").parse().unwrap_or(99.0);
+                1000.0 - num
+            } else if !is_virtual {
+                100.0 + traffic
+            } else {
+                0.0
+            }
+        };
+        score(b).total_cmp(&score(a))
+    });
+
+    let primary_iface = net_list
+        .first()
+        .map(|n| n.name.clone())
+        .unwrap_or_else(|| "en0".to_string());
     let temp = crate::smc::cpu_temp().unwrap_or(0.0) as f32;
     let gpu_temp = crate::smc::gpu_temp().unwrap_or(0.0) as f32;
     let fan_rpm = crate::smc::fans().first().map(|f| f.rpm as u32).unwrap_or(0);
     let power = system_power();
+    let gpu = gpu_metrics();
 
     let disks_snapshot = disk_list.clone();
+    let network_detail = collect_network_detail(&primary_iface);
+
     let mut snapshot = Snapshot {
         host: hostname(),
         platform: format!("darwin {}", os_version()),
@@ -275,6 +342,7 @@ pub fn collect(system: &mut System, disks: &Disks, networks: &Networks) -> Snaps
             load5,
             load15,
         },
+        gpu,
         memory: Memory {
             total: mem_total,
             used: mem_used,
@@ -293,6 +361,7 @@ pub fn collect(system: &mut System, disks: &Disks, networks: &Networks) -> Snaps
             write_rate: 0,
         },
         network: net_list,
+        network_detail,
         thermal: Thermal {
             cpu_temp: temp,
             gpu_temp,
@@ -306,6 +375,124 @@ pub fn collect(system: &mut System, disks: &Disks, networks: &Networks) -> Snaps
     snapshot.health_score_msg = msg;
 
     snapshot
+}
+
+/// 采集网络接口详情（IPv4、代理、接口类型、低延迟状态）。
+pub fn collect_network_detail(fallback_interface: &str) -> NetworkDetail {
+    // 1. 获取默认路由接口
+    let default_iface = Command::new("route")
+        .args(&["-n", "get", "default"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                if line.contains("interface:") {
+                    return line.split(':').nth(1).map(|v| v.trim().to_string());
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| fallback_interface.to_string());
+
+    let iface = if default_iface.is_empty() {
+        fallback_interface.to_string()
+    } else {
+        default_iface
+    };
+
+    // 2. IPv4 地址
+    let ipv4 = Command::new("ipconfig")
+        .args(&["getifaddr", &iface])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() && s.contains('.') {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    // 3. 代理配置
+    let proxy = Command::new("scutil")
+        .arg("--proxy")
+        .output()
+        .ok()
+        .map(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("HTTPEnable : 1") {
+                let host = s.lines().find(|l| l.contains("HTTPProxy")).and_then(|l| l.split(':').nth(1)).map(|v| v.trim()).unwrap_or("");
+                let port = s.lines().find(|l| l.contains("HTTPPort")).and_then(|l| l.split(':').nth(1)).map(|v| v.trim()).unwrap_or("");
+                if !host.is_empty() && !port.is_empty() {
+                    format!("HTTP {host}:{port}")
+                } else {
+                    "HTTP 代理".to_string()
+                }
+            } else if s.contains("SOCKSEnable : 1") {
+                let host = s.lines().find(|l| l.contains("SOCKSProxy")).and_then(|l| l.split(':').nth(1)).map(|v| v.trim()).unwrap_or("");
+                let port = s.lines().find(|l| l.contains("SOCKSPort")).and_then(|l| l.split(':').nth(1)).map(|v| v.trim()).unwrap_or("");
+                if !host.is_empty() && !port.is_empty() {
+                    format!("SOCKS {host}:{port}")
+                } else {
+                    "SOCKS 代理".to_string()
+                }
+            } else {
+                "直连".to_string()
+            }
+        })
+        .unwrap_or_else(|| "直连".to_string());
+
+    // 4. 接口类型（Wi-Fi / 以太网）
+    let kind = Command::new("networksetup")
+        .arg("-listallhardwareports")
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let blocks = s.split("Hardware Port: ");
+            for b in blocks {
+                if b.contains(&format!("Device: {iface}")) {
+                    let first_line = b.lines().next().unwrap_or("");
+                    if first_line.contains("Wi-Fi") {
+                        return Some("Wi-Fi".to_string());
+                    } else if first_line.contains("Ethernet") || first_line.contains("LAN") {
+                        return Some("以太网".to_string());
+                    } else {
+                        return Some(first_line.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            if iface.starts_with("en") {
+                "Wi-Fi".to_string()
+            } else {
+                iface.clone()
+            }
+        });
+
+    // 5. 低延迟状态（检查 awdl0 是否已关闭）
+    let low_latency_enabled = Command::new("ifconfig")
+        .arg("awdl0")
+        .output()
+        .ok()
+        .map(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            !s.contains("<UP,") && !s.contains("status: active")
+        })
+        .unwrap_or(false);
+
+    NetworkDetail {
+        ipv4,
+        proxy,
+        interface_name: iface,
+        kind,
+        low_latency_enabled,
+    }
 }
 
 /// 主机名。
@@ -322,6 +509,45 @@ fn hostname() -> String {
 /// 系统功耗。读不到返回 0。
 fn system_power() -> f32 {
     0.0
+}
+
+/// 采集 GPU 指标（使用率百分比与统一显存使用量）。
+///
+/// 在 macOS 上通过 `ioreg -r -c IOAccelerator -d 1` 从驱动层的 `PerformanceStatistics`
+/// 中提取 `Device Utilization %` 与 `In use system memory`。
+pub fn gpu_metrics() -> Gpu {
+    let output = Command::new("ioreg")
+        .args(&["-r", "-c", "IOAccelerator", "-d", "1"])
+        .output();
+    let mut usage = 0.0f32;
+    let mut memory_used = 0u64;
+
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(pos) = text.find("\"PerformanceStatistics\"") {
+            let slice = &text[pos..];
+            if let Some(val) = extract_number_after_key(slice, "\"Device Utilization %\"") {
+                usage = (val as f32).clamp(0.0, 100.0);
+            }
+            if let Some(val) = extract_number_after_key(slice, "\"In use system memory\"") {
+                memory_used = val as u64;
+            }
+        }
+    }
+
+    Gpu { usage, memory_used }
+}
+
+fn extract_number_after_key(text: &str, key: &str) -> Option<f64> {
+    let key_pos = text.find(key)?;
+    let rest = &text[key_pos + key.len()..];
+    let eq_pos = rest.find('=')?;
+    let after_eq = rest[eq_pos + 1..].trim_start();
+    let num_str: String = after_eq
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    num_str.parse::<f64>().ok()
 }
 
 /// 计算健康评分。范围 0-100，越高越好。
@@ -428,15 +654,22 @@ mod tests {
         let mut sys = System::new_all();
         let disks = Disks::new_with_refreshed_list();
         let networks = Networks::new_with_refreshed_list();
-        let snap = collect(&mut sys, &disks, &networks);
+        let snap = collect(&mut sys, &disks, &networks, 0.6);
 
         assert!(snap.health_score <= 100);
         assert!(snap.cpu.logical_cpu > 0);
         assert!(snap.memory.total > 0);
-        assert!(!snap.hardware.cpu_model.is_empty());
+        assert!(snap.hardware.cpu_model.is_empty() == false);
         assert!(snap.uptime_seconds > 0);
+        assert!(snap.gpu.usage >= 0.0 && snap.gpu.usage <= 100.0);
         // 根分区必须存在，界面依赖它显示主盘占用。
         assert!(snap.disks.iter().any(|d| d.mount == "/"));
+    }
+
+    #[test]
+    fn collects_gpu_metrics() {
+        let gpu = gpu_metrics();
+        assert!(gpu.usage >= 0.0 && gpu.usage <= 100.0);
     }
 
     #[test]
@@ -444,7 +677,7 @@ mod tests {
         let mut sys = System::new_all();
         let disks = Disks::new_with_refreshed_list();
         let networks = Networks::new_with_refreshed_list();
-        let snap = collect(&mut sys, &disks, &networks);
+        let snap = collect(&mut sys, &disks, &networks, 0.6);
         assert!(snap.health_score <= 100);
         assert!(!snap.health_score_msg.is_empty());
     }

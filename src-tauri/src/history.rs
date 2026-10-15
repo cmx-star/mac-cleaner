@@ -238,6 +238,24 @@ fn read_operations(path: &PathBuf) -> Vec<Operation> {
         .collect()
 }
 
+/// 记录一条操作日志（与 Mole operations.log 格式一致）。
+pub fn log_operation(command: &str, action: &str, path: &str, detail: Option<&str>) {
+    let Some(dir) = logs_dir() else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let log_file = dir.join("operations.log");
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let line = match detail {
+        Some(d) if !d.is_empty() => format!("[{now}] [{command}] {action} {path} ({d})\n"),
+        _ => format!("[{now}] [{command}] {action} {path}\n"),
+    };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_file) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// 读取删除日志。
 ///
 /// 行格式（由 `lib/core/history.sh` 写入）：以 `|` 分隔的字段，形如

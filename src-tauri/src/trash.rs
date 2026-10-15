@@ -13,7 +13,6 @@
 use crate::safety;
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
 
 /// 单个路径的处理结果。
 #[derive(Debug, Clone, Serialize)]
@@ -115,113 +114,57 @@ pub fn move_to_trash(paths: &[String]) -> Vec<TrashOutcome> {
     filled
 }
 
-/// 调用一次 osascript，把 accepted 里的路径全部移入废纸篓。
+/// 把 accepted 里的路径逐个移入废纸篓。
 ///
-/// 一次调用处理全部路径：每条都起一个 osascript 在删几十个文件时会明显变慢。
+/// 使用系统原生 Cocoa API `NSFileManager.trashItemAtURL`（基于 `trash` crate）。
+/// 纯 Rust 原生调用，不依赖外部 `osascript` 进程，支持重名处理、跨卷移动与访达「放回原处」。
 fn trash_batch(paths: &[String]) -> Vec<TrashOutcome> {
-    const SCRIPT: &str = r#"
-ObjC.import('AppKit');
-ObjC.import('Foundation');
+    paths
+        .iter()
+        .map(|p| {
+            let path = Path::new(p);
+            // 如果文件已不存在，按成功处理
+            if !path.exists() {
+                return TrashOutcome {
+                    path: p.clone(),
+                    ok: true,
+                    error: None,
+                };
+            }
 
-const args = $.NSProcessInfo.processInfo.arguments;
-const fm = $.NSFileManager.defaultManager;
-const results = [];
+            // 1. 调用系统原生 API
+            match trash::delete(path) {
+                Ok(()) => TrashOutcome {
+                    path: p.clone(),
+                    ok: true,
+                    error: None,
+                },
+                Err(e) => {
+                    // 2. 尝试解除只读权限后重试
+                    if let Ok(meta) = std::fs::symlink_metadata(path) {
+                        let mut perms = meta.permissions();
+                        if perms.readonly() {
+                            perms.set_readonly(false);
+                            let _ = std::fs::set_permissions(path, perms);
+                            if trash::delete(path).is_ok() {
+                                return TrashOutcome {
+                                    path: p.clone(),
+                                    ok: true,
+                                    error: None,
+                                };
+                            }
+                        }
+                    }
 
-for (let i = 4; i < args.count; i++) {
-  const p = ObjC.unwrap(args.objectAtIndex(i));
-  try {
-    const url = $.NSURL.fileURLWithPath($.NSString.stringWithString(p));
-    // trashItemAtURL:resultingItemURL:error: 的 error 是 NSError**，
-    // JXA 里需要传一个 Ref 容器接收。
-    const errRef = Ref();
-    // 由系统完成移动与废纸篓注册，重名、跨卷都由它处理，
-    // 用户的「放回原处」也能正常工作。
-    const ok = fm.trashItemAtURLResultingItemURLError(url, null, errRef);
-    if (ok) {
-      results.push({ path: p, ok: true });
-    } else {
-      let msg = 'unknown';
-      try {
-        const e = errRef[0];
-        if (e) {
-          msg = ObjC.unwrap(e.localizedDescription) || ObjC.unwrap(e.description) || String(e);
-        }
-      } catch (inner) {
-        msg = String(inner);
-      }
-      results.push({ path: p, ok: false, error: String(msg) });
-    }
-  } catch (e) {
-    results.push({ path: p, ok: false, error: String(e) });
-  }
-}
-
-JSON.stringify(results);
-"#;
-
-    let mut cmd = Command::new("osascript");
-    cmd.arg("-l").arg("JavaScript").arg("-e").arg(SCRIPT);
-    // osascript 的参数里，前几个是脚本与语言标志，脚本用 arguments[4] 起读，
-    // 因此这里先补两个占位参数，让用户路径落在 index 4 之后。
-    cmd.arg("--");
-    cmd.arg("placeholder");
-    for p in paths {
-        cmd.arg(p);
-    }
-
-    let Ok(out) = cmd.output() else {
-        return paths
-            .iter()
-            .map(|p| TrashOutcome {
-                path: p.clone(),
-                ok: false,
-                error: Some("无法启动 osascript".to_string()),
-            })
-            .collect();
-    };
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return paths
-            .iter()
-            .map(|p| TrashOutcome {
-                path: p.clone(),
-                ok: false,
-                error: Some(if stderr.is_empty() {
-                    "osascript 执行失败".to_string()
-                } else {
-                    stderr.clone()
-                }),
-            })
-            .collect();
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        path: String,
-        ok: bool,
-        #[serde(default)]
-        error: Option<String>,
-    }
-
-    match serde_json::from_slice::<Vec<Raw>>(&out.stdout) {
-        Ok(list) => list
-            .into_iter()
-            .map(|r| TrashOutcome {
-                path: r.path,
-                ok: r.ok,
-                error: r.error,
-            })
-            .collect(),
-        Err(e) => paths
-            .iter()
-            .map(|p| TrashOutcome {
-                path: p.clone(),
-                ok: false,
-                error: Some(format!("解析结果失败：{e}")),
-            })
-            .collect(),
-    }
+                    TrashOutcome {
+                        path: p.clone(),
+                        ok: false,
+                        error: Some(format!("移入废纸篓失败：{e}")),
+                    }
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -285,5 +228,20 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
         assert!(outcomes.iter().all(|o| !o.ok));
         assert!(outcomes.iter().all(|o| o.error.is_some()));
+    }
+
+    #[test]
+    fn trash_real_file_succeeds() {
+        if let Some(home) = safety::home_dir() {
+            let tmp_dir = format!("{home}/Downloads");
+            let tmp_file = format!("{tmp_dir}/talpa_trash_test_{}.txt", std::process::id());
+            if std::fs::write(&tmp_file, "talpa test content").is_ok() {
+                assert!(Path::new(&tmp_file).exists());
+                let outcomes = move_to_trash(&[tmp_file.clone()]);
+                assert_eq!(outcomes.len(), 1);
+                assert!(outcomes[0].ok, "原生移入废纸篓应成功: {:?}", outcomes[0].error);
+                assert!(!Path::new(&tmp_file).exists(), "文件应已不在原路径");
+            }
+        }
     }
 }
