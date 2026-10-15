@@ -69,6 +69,11 @@ export interface Cpu {
   load15: number;
 }
 
+export interface Gpu {
+  usage: number;
+  memory_used: number;
+}
+
 export interface Memory {
   total: number;
   used: number;
@@ -125,6 +130,58 @@ export interface ProcessInfo {
   icon_png_base64: string | null;
 }
 
+export interface ProcessTreeNode {
+  name: string;
+  pid: number;
+}
+
+export interface ProcessGroupSummary {
+  total_procs: number;
+  total_cpu: number;
+  total_memory: number;
+  user: string;
+  managed_by: string;
+}
+
+export interface RelatedProcess {
+  pid: number;
+  name: string;
+  cpu_percent: number;
+  memory: number;
+}
+
+export interface ProcessDetail {
+  pid: number;
+  name: string;
+  icon_png_base64: string | null;
+  bundle_path: string | null;
+  exe: string | null;
+  cwd: string | null;
+  command: string;
+  user: string;
+  start_time_human: string;
+  threads: number;
+  open_files: number;
+  disk_read_bytes: number;
+  disk_write_bytes: number;
+  listening_ports: string[];
+  confidence: string;
+  basis: string;
+  launchd_trigger: string;
+  launchd_service: string | null;
+  parent_tree: ProcessTreeNode[];
+  group_summary: ProcessGroupSummary;
+  related_processes: RelatedProcess[];
+}
+
+export interface NetworkDetail {
+  ipv4: string;
+  proxy: string;
+  interface_name: string;
+  kind: string;
+  low_latency_enabled: boolean;
+}
+
 export interface Snapshot {
   host: string;
   platform: string;
@@ -136,10 +193,12 @@ export interface Snapshot {
   health_score: number;
   health_score_msg: string;
   cpu: Cpu;
+  gpu: Gpu;
   memory: Memory;
   disks: Disk[];
   disk_io: { read_rate: number; write_rate: number };
   network: NetInterface[];
+  network_detail: NetworkDetail;
   thermal: Thermal;
 }
 

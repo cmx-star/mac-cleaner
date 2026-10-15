@@ -9,6 +9,7 @@ import type {
   Fan,
   FanMode,
   History,
+  ProcessDetail,
   ProcessInfo,
   Protection,
   ScanResult,
@@ -94,6 +95,22 @@ export function appIcon(bundleId: string): Promise<string | null> {
 
 export function topProcesses(limit?: number): Promise<ProcessInfo[]> {
   return invoke("top_processes", { limit: limit ?? null });
+}
+
+export function toggleLowLatency(enable: boolean): Promise<void> {
+  return invoke("toggle_low_latency", { enable });
+}
+
+export function killProcess(pid: number, force: boolean): Promise<void> {
+  return invoke("kill_process", { pid, force });
+}
+
+export function revealInFinder(path: string): Promise<void> {
+  return invoke("reveal_in_finder", { path });
+}
+
+export function processDetail(pid: number): Promise<ProcessDetail> {
+  return invoke("process_detail", { pid });
 }
 
 /** 人类可读的体积显示。 */
