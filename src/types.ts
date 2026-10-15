@@ -100,6 +100,17 @@ export interface Thermal {
   system_power: number;
 }
 
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+  memory: number;
+  cpu_percent: number;
+  /** 可执行文件路径。 */
+  exe: string | null;
+  /** 所属 .app bundle 路径，取不到为 null。 */
+  bundle_path: string | null;
+}
+
 export interface Snapshot {
   host: string;
   platform: string;
@@ -125,6 +136,8 @@ export interface App {
   path: string;
   size: number;
   size_display: string;
+  version: string;
+  last_used_days_ago: number | null;
   protected: boolean;
   protection_reason: string | null;
 }
@@ -163,6 +176,27 @@ export interface History {
   sessions: Session[];
   deletions: Deletion[];
   limit: number;
+}
+
+/** 启动项分类，对应界面上的三个分组。 */
+export type StartupItemKind = "login_item" | "background" | "service";
+
+export interface StartupItem {
+  id: string;
+  name: string;
+  kind: StartupItemKind;
+  enabled: boolean;
+  developer: string | null;
+  url: string | null;
+  parent: string | null;
+  /** 本应用能否切换该项。系统托管的项为 false。 */
+  toggleable: boolean;
+  /** 不可切换时的原因。 */
+  reason: string | null;
+  /** 所属 .app bundle 路径，用于取图标。 */
+  bundle_path: string | null;
+  /** 图标（PNG base64）。 */
+  icon_png_base64: string | null;
 }
 
 export interface CliLocation {

@@ -131,24 +131,100 @@ pub async fn read_whitelist() -> Result<Vec<String>, String> {
         .map_err(|e| format!("读取保护名单异常：{e}"))
 }
 
-/// 判断路径是否属于受保护范围，界面用它做即时提示。
+/// 读取单个应用图标（PNG base64）。
 #[tauri::command]
-pub async fn classify_path(path: String) -> Result<PathVerdict, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let whitelist = crate::safety::load_whitelist();
-        let protection = crate::safety::classify(std::path::Path::new(&path), &whitelist);
-        PathVerdict {
-            protection,
-            reason: protection.reason().map(str::to_string),
-        }
-    })
-    .await
-    .map_err(|e| format!("判断路径异常：{e}"))
+pub async fn app_icon(bundle_id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::apps::app_icon(&bundle_id))
+        .await
+        .map_err(|e| format!("图标读取异常：{e}"))
 }
 
-/// 路径判断结果。
+/// 进程列表条目。
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PathVerdict {
-    pub protection: crate::safety::Protection,
-    pub reason: Option<String>,
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+    /// 物理内存占用（字节）。
+    pub memory: u64,
+    /// CPU 使用率（自上次刷新以来的均值）。
+    pub cpu_percent: f32,
+    /// 进程可执行文件路径，用于反查所属 App。
+    pub exe: Option<String>,
+    /// 所属 .app bundle 路径（能从 exe 反查到才有）。
+    pub bundle_path: Option<String>,
+    /// 所属 App 的图标（PNG base64）。
+    pub icon_png_base64: Option<String>,
+}
+
+/// 从可执行文件路径反查所属 `.app` bundle。
+///
+/// 形如 `/Applications/Foo.app/Contents/MacOS/Foo` → `/Applications/Foo.app`。
+/// 进程不在任何 bundle 内（如系统守护进程、CLI 工具）时返回 None，
+/// 界面用首字母占位。
+fn bundle_from_exe(exe: &str) -> Option<String> {
+    let idx = exe.find(".app/")?;
+    let bundle = &exe[..idx + 4];
+    // 只接受绝对路径，避免把相对路径当 bundle。
+    if bundle.starts_with('/') {
+        Some(bundle.to_string())
+    } else {
+        None
+    }
+}
+
+/// 列出资源占用最高的进程。
+#[tauri::command]
+pub async fn top_processes(
+    collector: State<'_, Collector>,
+    limit: Option<usize>,
+) -> Result<Vec<ProcessInfo>, String> {
+    let limit = limit.unwrap_or(12).clamp(1, 50);
+
+    let mut sys = collector
+        .system
+        .lock()
+        .map_err(|_| "状态采集器被占用".to_string())?;
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let mut procs: Vec<ProcessInfo> = sys
+        .processes()
+        .values()
+        .map(|p| {
+            let exe = p
+                .exe()
+                .map(|e| e.to_string_lossy().into_owned());
+            let bundle_path = exe.as_deref().and_then(bundle_from_exe);
+            ProcessInfo {
+                pid: p.pid().as_u32(),
+                name: p.name().to_string_lossy().into_owned(),
+                memory: p.memory(),
+                cpu_percent: p.cpu_usage(),
+                exe,
+                bundle_path,
+                icon_png_base64: None,
+            }
+        })
+        .collect();
+
+    // 先按内存排，再按 CPU 排，界面各取所需；只保留非系统空闲项。
+    procs.retain(|p| p.memory > 0);
+    procs.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+    procs.truncate(limit);
+
+    // 截断之后再取图标：只为真正展示的这几行起一次 osascript，
+    // 不给全部进程都查图标。
+    let bundles: Vec<String> = procs
+        .iter()
+        .filter_map(|p| p.bundle_path.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let icons = crate::apps::read_icons_base64(&bundles);
+    for p in procs.iter_mut() {
+        if let Some(bundle) = &p.bundle_path {
+            p.icon_png_base64 = icons.get(bundle).cloned();
+        }
+    }
+
+    Ok(procs)
 }

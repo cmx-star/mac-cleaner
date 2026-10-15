@@ -13,7 +13,7 @@
 use std::ffi::c_void;
 use std::sync::Mutex;
 
-#[link(name = "IOFramework", kind = "framework")]
+#[link(name = "IOKit", kind = "framework")]
 extern "C" {
     fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
     fn IOServiceMatching(name: *const i8) -> *mut c_void;
@@ -46,66 +46,75 @@ const SMC_WRITE_KEY: u8 = 6;
 /// 结构体大小必须严格等于 80。
 const SMC_STRUCT_SIZE: usize = 80;
 
-/// SMCParamStruct。总大小 80 字节，手工排布保证与内核接口严格一致
-/// （Swift 侧用 MemoryLayout 断言 size==80、bytes 偏移 48 验证过）：
-/// key(4) + data8(1，偏移 4) + pad(3) + data32(4，偏移 8) + vers/limit 区(8..40)
-/// + keyInfo(40..52) + result/status(52..54) + bytes(48..80，与 vers/limit 区重叠是
-/// 内核接口本身的设计：bytes 是读结果的通用载荷区)。
+// ---- 字段偏移（在 Apple M4 / macOS 15.8 上实测确定）----
+//
+// 全部 80 个偏移里，只有 data8=42 的调用会被内核接受（其余返回
+// kIOReturnNotPrivileged -536870206），据此定出下列偏移。
+const OFF_KEY: usize = 0; // key，小端 u32
+const OFF_KEYINFO_SIZE: usize = 28; // keyInfo.dataSize，小端 u32
+const OFF_KEYINFO_TYPE: usize = 32; // keyInfo.dataType，小端 u32
+const OFF_RESULT: usize = 36; // result 字节
+const OFF_DATA8: usize = 42; // 子命令字节
+const OFF_BYTES: usize = 48; // 数据载荷，32 字节
+
+/// SMCParamStruct，按字节排布以精确控制偏移。
 ///
-/// 为避免对齐陷阱，整体用 [u8; 80] 存储并按偏移读写。
+/// 两个容易踩的坑（本项目都踩过，导致 Apple Silicon 上一直读不到数据）：
+/// 1. `key` 由内核按**小端 u32** 解释，不能直接写 4 个 ASCII 字节。
+///    `"F0Ac"` 必须写成 `63 41 30 46`。
+/// 2. `result` 在偏移 36，不在 40 或 52。读错位置会把成功调用误判成失败。
 #[derive(Clone, Copy)]
 struct SmcParamStruct {
     raw: [u8; 80],
 }
-
 
 impl SmcParamStruct {
     fn zeroed() -> Self {
         Self { raw: [0; 80] }
     }
 
+    /// 写入 key。按小端 u32 排列，与内核的 FourCharCode 解释一致。
     fn set_key(&mut self, key: &str) {
         let b = key.as_bytes();
-        self.raw[0..4].copy_from_slice(b);
+        self.raw[OFF_KEY] = b[3];
+        self.raw[OFF_KEY + 1] = b[2];
+        self.raw[OFF_KEY + 2] = b[1];
+        self.raw[OFF_KEY + 3] = b[0];
     }
 
-    /// 子命令字节，偏移 4。
-    fn data8(&self) -> u8 {
-        self.raw[4]
-    }
-
+    /// 子命令字节。
     fn set_data8(&mut self, v: u8) {
-        self.raw[4] = v;
+        self.raw[OFF_DATA8] = v;
     }
 
-    /// keyInfo 区，偏移 40..52：dataSize u32 | dataType u32 | dataAttributes u8 + pad(3)。
-    fn key_info(&self) -> [u8; 12] {
-        self.raw[40..52].try_into().unwrap()
-    }
-
-    fn set_key_info(&mut self, info: [u8; 12]) {
-        self.raw[40..52].copy_from_slice(&info);
-    }
-
-    fn key_type(&self) -> u32 {
-        u32::from_be_bytes(self.raw[44..48].try_into().unwrap())
-    }
-
+    /// keyInfo.dataSize（小端 u32）。
     fn key_data_size(&self) -> usize {
-        u32::from_be_bytes(self.raw[40..44].try_into().unwrap()) as usize
+        let p = &self.raw[OFF_KEYINFO_SIZE..OFF_KEYINFO_SIZE + 4];
+        u32::from_le_bytes(p.try_into().unwrap()) as usize
+    }
+
+    fn set_key_data_size(&mut self, size: u32) {
+        self.raw[OFF_KEYINFO_SIZE..OFF_KEYINFO_SIZE + 4].copy_from_slice(&size.to_le_bytes());
+    }
+
+    /// keyInfo.dataType，转回可读的 4 字符类型码（如 `flt ` / `sp78` / `ui8 `）。
+    fn key_data_type(&self) -> String {
+        let p = &self.raw[OFF_KEYINFO_TYPE..OFF_KEYINFO_TYPE + 4];
+        p.iter().rev().map(|b| *b as char).collect()
     }
 
     fn result(&self) -> u8 {
-        self.raw[52]
+        self.raw[OFF_RESULT]
     }
 
-    /// 数据载荷区，偏移 48..80。
-    fn bytes(&self) -> &[u8; 32] {
-        self.raw[48..80].try_into().unwrap()
+    /// 数据载荷区（偏移 48..80）。
+    fn bytes(&self) -> &[u8] {
+        &self.raw[OFF_BYTES..OFF_BYTES + 32]
     }
 
     fn set_bytes(&mut self, data: &[u8]) {
-        self.raw[48..48 + data.len()].copy_from_slice(data);
+        let n = data.len().min(32);
+        self.raw[OFF_BYTES..OFF_BYTES + n].copy_from_slice(&data[..n]);
     }
 }
 
@@ -174,20 +183,25 @@ fn smc_call(input: &SmcParamStruct) -> Result<SmcParamStruct, String> {
     if kr != 0 {
         return Err(format!("SMC 调用失败（kern_return {kr}）"));
     }
-    if output.result() != 0 {
-        return Err(format!("SMC 返回错误码 {}", output.result()));
-    }
+    // 不在这里检查 result：实测读 keyInfo 时该字节为 0x84 但调用实际成功，
+    // 成功与否由调用方按 keyInfo.dataSize 判断。
     Ok(output)
 }
 
 /// GetKeyInfo：拿键的类型与大小。
-fn key_info(key: &str) -> Result<(u32, usize), String> {
+fn key_info(key: &str) -> Result<(String, usize), String> {
     let mut input = SmcParamStruct::zeroed();
     input.set_key(key);
-    input.data8 = SMC_GET_KEY_INFO;
+    input.set_data8(SMC_GET_KEY_INFO);
 
     let out = smc_call(&input)?;
-    Ok((out.key_type(), out.key_data_size()))
+
+    let size = out.key_data_size();
+    // 键不存在时 size 为 0。内核在找不到键时不一定填 result，以 size 为准更可靠。
+    if size == 0 || size > 32 {
+        return Err(format!("SMC 键不存在或大小异常：{key}"));
+    }
+    Ok((out.key_data_type(), size))
 }
 
 /// 读原始键值，返回 (4 字符类型码, 数据字节)。
@@ -196,16 +210,16 @@ pub fn read_key_raw(key: &str) -> Result<(String, Vec<u8>), String> {
         return Err(format!("SMC 键必须是 4 字节：{key}"));
     }
 
-    let (data_type, data_size) = key_info(key)?;
-    let data_size = data_size.min(32);
+    let (type_str, data_size) = key_info(key)?;
 
     let mut input = SmcParamStruct::zeroed();
     input.set_key(key);
-    input.data8 = SMC_READ_KEY;
+    input.set_data8(SMC_READ_KEY);
+    // 读值时要把 keyInfo.dataSize 带回去，否则内核不知道要拷多少字节。
+    input.set_key_data_size(data_size as u32);
 
     let out = smc_call(&input)?;
-    let type_str: String = data_type.to_be_bytes().iter().map(|b| *b as char).collect();
-    Ok((type_str, out.bytes[..data_size].to_vec()))
+    Ok((type_str, out.bytes()[..data_size].to_vec()))
 }
 
 /// 读取数值，按类型自动解码。
@@ -217,12 +231,13 @@ pub fn read(key: &str) -> Option<f64> {
 /// 按类型码解码。
 fn decode(type_str: &str, data: &[u8]) -> Option<f64> {
     match type_str {
-        // IEEE 754 单精度。
+        // IEEE 754 单精度。实测字节序为【小端】：`00 d0 01 45` = 2073.0 RPM。
+        // （Apple Silicon 上 SMC 的 flt 与 key 一样按小端存取。）
         "flt " => {
             if data.len() < 4 {
                 return None;
             }
-            Some(f32::from_be_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
         }
         // 定点 14.2：大端整数除以 4（Intel 风扇转速）。
         "fpe2" => {
@@ -255,60 +270,86 @@ fn decode(type_str: &str, data: &[u8]) -> Option<f64> {
     }
 }
 
-/// 写数值。写入时 keyInfo 必须带上真实的类型与大小（与 mac-status 一致）。
+/// 写数值。写入时 keyInfo 必须带上真实的类型与大小。
 /// 写 SMC 需要 root；普通进程会失败，由 fanctl 助手（setuid root）执行。
 pub fn write(key: &str, value: f64) -> Result<(), String> {
     if key.as_bytes().len() != 4 {
         return Err(format!("SMC 键必须是 4 字节：{key}"));
     }
 
-    let (data_type, data_size) = key_info(key)?;
+    let (type_str, data_size) = key_info(key)?;
 
-    let bytes: Vec<u8> = match data_type {
-        0x666C7420 => f32::from(value as f32).to_be_bytes().to_vec(),          // "flt "
-        0x75693136 => (value as u16).to_be_bytes().to_vec(),                   // "ui16"
-        0x75693820 => vec![value as u8],                                       // "ui8 "
-        0x66706532 => ((value * 4.0).round() as u16).to_be_bytes().to_vec(),   // "fpe2"
-        0x73703738 => ((value * 256.0).round() as u16).to_be_bytes().to_vec(), // "sp78"
-        other => {
-            let s: String = other.to_be_bytes().iter().map(|b| *b as char).collect();
-            return Err(format!("SMC 键类型 {s} 不支持写入"));
-        }
+    let bytes: Vec<u8> = match type_str.as_str() {
+        "flt " => (value as f32).to_le_bytes().to_vec(),
+        "ui16" => (value as u16).to_be_bytes().to_vec(),
+        "ui8 " => vec![value as u8],
+        "fpe2" => ((value * 4.0).round() as u16).to_be_bytes().to_vec(),
+        "sp78" => ((value * 256.0).round() as u16).to_be_bytes().to_vec(),
+        other => return Err(format!("SMC 键类型 {other} 不支持写入")),
     };
 
     let mut input = SmcParamStruct::zeroed();
     input.set_key(key);
-    input.data8 = SMC_WRITE_KEY;
-    let mut info = [0u8; 12];
-    info[..4].copy_from_slice(&(data_size as u32).to_be_bytes());
-    info[4..8].copy_from_slice(&data_type.to_be_bytes());
-    input.set_key_info(info);
-    input.bytes[..bytes.len()].copy_from_slice(&bytes);
+    input.set_data8(SMC_WRITE_KEY);
+    input.set_key_data_size(data_size as u32);
+    input.set_bytes(&bytes);
 
     smc_call(&input)?;
     Ok(())
 }
 
 /// 温度传感器键候选。Apple Silicon 上 `TC0P` 是 CPU 近似温度。
-const CPU_TEMP_KEYS: &[&str] = &["TC0P", "TC0D", "Tp01", "Tp09"];
-const GPU_TEMP_KEYS: &[&str] = &["TG0P", "TG0D", "Tg05"];
+/// CPU 温度键候选。
+///
+/// Apple Silicon（M 系列）用 `Tp0x` 系列，实测 M4 上存在 Tp01/Tp02/Tp04..Tp0f
+/// 共 13 个核心传感器；Intel 机型用 `TC0P`/`TC0D`。两套都列上，读到哪个用哪个。
+const CPU_TEMP_KEYS: &[&str] = &[
+    // Apple Silicon 核心传感器
+    "Tp01", "Tp02", "Tp04", "Tp05", "Tp06", "Tp08", "Tp09", "Tp0a", "Tp0b", "Tp0c", "Tp0d",
+    "Tp0e", "Tp0f",
+    // Intel 机型
+    "TC0P", "TC0D", "TC0E", "TC0F",
+];
+
+/// GPU 温度键候选。Apple Silicon 用 `Tg0x`，Intel 用 `TG0P`/`TG0D`。
+const GPU_TEMP_KEYS: &[&str] = &["Tg0D", "Tg0L", "Tg0d", "Tg0k", "Tg0T", "TG0P", "TG0D"];
 
 fn plausible_temp(v: f64) -> bool {
     v > 0.0 && v < 150.0
 }
 
-/// 读取 CPU 温度（摄氏度）。多键依次尝试。
+/// 读取 CPU 温度（摄氏度）：取全部可用核心传感器里的最高值。
+///
+/// 取最高值而不是平均值，因为用户关心的是「会不会过热」，
+/// 单个核心冲到 100°C 时平均值会被其他核心稀释掉。
+/// 读不到任何核心传感器时退回到「第一个可读的候选键」。
 pub fn cpu_temp() -> Option<f64> {
-    CPU_TEMP_KEYS
+    let temps: Vec<f64> = CPU_TEMP_KEYS
         .iter()
-        .find_map(|k| read(k).filter(|v| plausible_temp(*v)))
+        .filter_map(|k| read(k))
+        .filter(|v| plausible_temp(*v))
+        .collect();
+
+    temps.iter().cloned().fold(None, |acc: Option<f64>, v| {
+        Some(match acc {
+            Some(m) if m > v => m,
+            _ => v,
+        })
+    })
 }
 
-/// 读取 GPU 温度（摄氏度）。
+/// 读取 GPU 温度（摄氏度）：同样取最高值。
 pub fn gpu_temp() -> Option<f64> {
     GPU_TEMP_KEYS
         .iter()
-        .find_map(|k| read(k).filter(|v| plausible_temp(*v)))
+        .filter_map(|k| read(k))
+        .filter(|v| plausible_temp(*v))
+        .fold(None, |acc: Option<f64>, v| {
+            Some(match acc {
+                Some(m) if m > v => m,
+                _ => v,
+            })
+        })
 }
 
 /// 风扇信息。
@@ -357,7 +398,7 @@ pub fn fans() -> Vec<Fan> {
 }
 
 /// 风扇控制模式。
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FanMode {
     /// 恢复系统自动控制（写 `F{i}Md = 0`）。
@@ -449,7 +490,13 @@ mod tests {
     #[test]
     fn decodes_flt() {
         let v = 45.5f32;
-        assert_eq!(decode("flt ", &v.to_be_bytes()), Some(45.5));
+        assert_eq!(decode("flt ", &v.to_le_bytes()), Some(45.5));
+    }
+
+    #[test]
+    fn decodes_real_fan_sample() {
+        // 实测样本：`00 d0 01 45` 是小端的 0x4501d000 ≈ 2077.0 RPM。
+        assert_eq!(decode("flt ", &[0x00, 0xd0, 0x01, 0x45]), Some(2077.0));
     }
 
     #[test]
@@ -481,13 +528,60 @@ mod tests {
     #[test]
     fn live_smc_read_works_or_fails_gracefully() {
         // 真实 mac：能读则值合理；读不到则优雅降级，不 panic。
+        // 读不到键（非 Apple 硬件、键不存在）时返回 None，界面降级显示。
         if let Some(t) = cpu_temp() {
             assert!(plausible_temp(t), "CPU 温度应在合理范围：{t}");
+        }
+        if let Some(t) = gpu_temp() {
+            assert!(plausible_temp(t), "GPU 温度应在合理范围：{t}");
         }
         for fan in fans() {
             assert!(fan.rpm > 0.0, "风扇转速应为正：{}", fan.rpm);
             if fan.max_rpm > 0.0 {
-                assert!(fan.rpm <= fan.max_rpm * 1.1, "转速不应超过最大值");
+                // 手动模式下目标值可能略超标称上限，留 10% 余量。
+                assert!(
+                    fan.rpm <= fan.max_rpm * 1.1,
+                    "转速 {} 不应超过最大值 {} 的 110%",
+                    fan.rpm,
+                    fan.max_rpm
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_temp_takes_the_hottest_sensor() {
+        // Apple Silicon 上 CPU 有多个核心传感器，cpu_temp() 取最高值：
+        // 单个核心逼近上限才是用户要看的信号，平均值会把它稀释掉。
+        // 这里用真实机器验证：读到的值必须落在任一核心传感器的区间内。
+        let Some(hottest) = cpu_temp() else {
+            return; // 非 mac 或读不到时跳过
+        };
+        let all: Vec<f64> = CPU_TEMP_KEYS
+            .iter()
+            .filter_map(|k| read(k))
+            .filter(|v| plausible_temp(*v))
+            .collect();
+        if all.is_empty() {
+            return;
+        }
+        let max = all.iter().cloned().fold(f64::MIN, f64::max);
+        let min = all.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            (hottest - max).abs() < 0.001,
+            "cpu_temp() 应返回最高值 {max}，实际 {hottest}"
+        );
+        assert!(hottest >= min, "返回值不应低于最低传感器 {min}");
+    }
+
+    #[test]
+    fn reports_which_keys_exist_on_this_machine() {
+        // 诊断用：列出关键键的可读性，便于在不同机型上排查。
+        for key in ["FNum", "F0Ac", "F0Tg", "F0Md", "F0Mn", "F0Mx", "TC0P", "TG0P"] {
+            let result = read_key_raw(key);
+            match result {
+                Ok((t, d)) => println!("{key}: type={t} bytes={:02x?} value={:?}", d, read(key)),
+                Err(e) => println!("{key}: 不可读（{e}）"),
             }
         }
     }

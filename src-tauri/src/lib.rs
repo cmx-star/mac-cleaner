@@ -1,4 +1,4 @@
-//! Mole 桌面版后端。
+//! Talpa 桌面版后端。
 //!
 //! 分工：只读能力（扫描、状态、应用列表、历史）在本进程内实现；
 //! 破坏性操作（清理、卸载、优化）转发给 Mole CLI，由它的安全层执行。
@@ -11,6 +11,7 @@ pub mod safety;
 pub mod scan;
 pub mod smc;
 pub mod status;
+pub mod trash;
 
 use commands::Collector;
 
@@ -33,7 +34,9 @@ pub fn run() {
             commands::run_optimize,
             commands::read_whitelist,
             commands::classify_path,
+            commands::app_icon,
+            commands::top_processes,
         ])
         .run(tauri::generate_context!())
-        .expect("启动 Mole 桌面版失败");
+        .expect("启动 Talpa 桌面版失败");
 }

@@ -5,6 +5,7 @@ import type {
   AppDataPath,
   CleanupPreview,
   CliLocation,
+  ProcessInfo,
   CommandOutput,
   History,
   Protection,
@@ -54,6 +55,14 @@ export function runOptimize(dryRun: boolean): Promise<CommandOutput> {
 
 export function classifyPath(path: string): Promise<{ protection: Protection; reason: string | null }> {
   return invoke("classify_path", { path });
+}
+
+export function appIcon(bundleId: string): Promise<string | null> {
+  return invoke("app_icon", { bundleId });
+}
+
+export function topProcesses(limit?: number): Promise<ProcessInfo[]> {
+  return invoke("top_processes", { limit: limit ?? null });
 }
 
 /** 人类可读的体积显示。 */

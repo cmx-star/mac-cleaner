@@ -2,13 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { readHistory } from "../api";
 import type { History } from "../types";
 
-const ACTION_LABELS: Record<string, string> = {
-  removed: "删除",
-  trashed: "废纸篓",
-  skipped: "跳过",
-  failed: "失败",
-};
-
 export default function HistoryPage() {
   const [history, setHistory] = useState<History | null>(null);
   const [error, setError] = useState<string | null>(null);

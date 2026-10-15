@@ -19,6 +19,10 @@ pub struct App {
     pub path: String,
     pub size: u64,
     pub size_display: String,
+    /// 应用版本（Info.plist 的 CFBundleShortVersionString）。
+    pub version: String,
+    /// 最近一次使用时间（距今天数）。None 表示无法判断。
+    pub last_used_days_ago: Option<u64>,
     /// 是否为系统受保护应用，不可卸载。
     pub protected: bool,
     pub protection_reason: Option<String>,
@@ -95,6 +99,11 @@ fn bundle_size(path: &Path) -> u64 {
 /// 优先使用 `defaults read`，它与 macOS 的 plist 解析行为一致，且能处理
 /// 二进制 plist。失败时退回文件名推断，但保持 id 为空而不是伪造。
 fn read_bundle_id(app_path: &Path) -> String {
+    plist_string(app_path, "CFBundleIdentifier")
+}
+
+/// 从 Info.plist 读取字符串值。
+fn plist_string(app_path: &Path, key: &str) -> String {
     let info = app_path.join("Contents/Info.plist");
     if !info.exists() {
         return String::new();
@@ -103,7 +112,7 @@ fn read_bundle_id(app_path: &Path) -> String {
     let out = Command::new("defaults")
         .arg("read")
         .arg(info.to_string_lossy().as_ref())
-        .arg("CFBundleIdentifier")
+        .arg(key)
         .output();
 
     match out {
@@ -112,6 +121,66 @@ fn read_bundle_id(app_path: &Path) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// 读取应用版本。
+fn read_version(app_path: &Path) -> String {
+    let v = plist_string(app_path, "CFBundleShortVersionString");
+    if v.is_empty() {
+        plist_string(app_path, "CFBundleVersion")
+    } else {
+        v
+    }
+}
+
+/// 计算应用最近使用时间（距今天数）。
+///
+/// 用 `mdls` 查 kMDItemLastUsedDate；查不到（从未打开过或 Spotlight 未索引）
+/// 返回 None，不伪造「很久没用」。
+fn last_used_days(app_path: &Path) -> Option<u64> {
+    let out = Command::new("mdls")
+        .arg("-raw")
+        .arg("-name")
+        .arg("kMDItemLastUsedDate")
+        .arg(app_path.to_string_lossy().as_ref())
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // 输出形如 `2026-05-12 08:33:41 +0000`，`(null)` 表示未索引。
+    let text = text.trim();
+    if text.is_empty() || text.contains("(null)") || text == "kMDItemLastUsedDate = (null)" {
+        return None;
+    }
+    let date_str = text.lines().next()?.trim();
+    let date_part = date_str.split(' ').next()?;
+
+    // 只解析 YYYY-MM-DD，与今天比较得出天数。
+    let mut parts = date_part.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+
+    let now_days = now_epoch_days();
+    let used_days = year * 365 + month * 31 + day;
+    Some((now_days - used_days).max(0) as u64)
+}
+
+/// 以「年*365 + 月*31 + 日」的粗略天数表示当前时间。
+fn now_epoch_days() -> i64 {
+    let out = Command::new("date").arg("+%Y-%m-%d").output();
+    let Ok(out) = out else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.trim().split('-');
+    let year: i64 = parts.next().unwrap_or("2026").parse().unwrap_or(2026);
+    let month: i64 = parts.next().unwrap_or("1").parse().unwrap_or(1);
+    let day: i64 = parts.next().unwrap_or("1").parse().unwrap_or(1);
+    year * 365 + month * 31 + day
 }
 
 /// 扫描一个应用目录下的所有 `.app`。
@@ -133,6 +202,8 @@ fn scan_dir(dir: &Path, apps: &mut Vec<App>) {
             let size = bundle_size(&path);
             let path_str = path.to_string_lossy().into_owned();
             let (protected, reason) = is_protected(&bundle_id, &path_str);
+            let version = read_version(&path);
+            let last_used = last_used_days(&path);
 
             apps.push(App {
                 name: name.trim_end_matches(".app").to_string(),
@@ -141,6 +212,8 @@ fn scan_dir(dir: &Path, apps: &mut Vec<App>) {
                 path: path_str,
                 size,
                 size_display: human_bytes(size),
+                version,
+                last_used_days_ago: last_used,
                 protected,
                 protection_reason: reason,
             });
@@ -268,5 +341,25 @@ mod tests {
     fn app_data_size_handles_empty_bundle_id() {
         assert!(app_data_size("").is_empty());
         assert!(app_data_size("com.definitely.not.installed.xyz").is_empty());
+    }
+
+    #[test]
+    fn reads_version_from_real_app() {
+        // 任意已安装应用都应有版本号字段（可能为空字符串但函数不 panic）。
+        let apps = list_apps();
+        if let Some(first) = apps.first() {
+            let _ = read_version(Path::new(&first.path));
+        }
+    }
+
+    #[test]
+    fn last_used_never_panics() {
+        let apps = list_apps();
+        if let Some(first) = apps.first() {
+            // None（未索引）或非负天数，两者都合法。
+            if let Some(days) = last_used_days(Path::new(&first.path)) {
+                assert!(days < 365 * 20, "最后使用时间不应超过 20 年：{days}");
+            }
+        }
     }
 }
