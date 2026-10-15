@@ -23,6 +23,8 @@ pub struct App {
     pub version: String,
     /// 最近一次使用时间（距今天数）。None 表示无法判断。
     pub last_used_days_ago: Option<u64>,
+    /// 应用图标（PNG base64，无图标时为 None）。
+    pub icon_png_base64: Option<String>,
     /// 是否为系统受保护应用，不可卸载。
     pub protected: bool,
     pub protection_reason: Option<String>,
@@ -214,6 +216,7 @@ fn scan_dir(dir: &Path, apps: &mut Vec<App>) {
                 size_display: human_bytes(size),
                 version,
                 last_used_days_ago: last_used,
+                icon_png_base64: None,
                 protected,
                 protection_reason: reason,
             });
@@ -224,7 +227,87 @@ fn scan_dir(dir: &Path, apps: &mut Vec<App>) {
     }
 }
 
-/// 列出已安装应用，按体积从大到小排序。
+/// 批量读取应用图标（PNG base64），键为应用路径。
+///
+/// 走一次 `osascript` 调 `NSWorkspace.iconForFile`，而不是每个应用各起
+/// sips + base64 两个进程：90 个应用时前者约 1 秒，后者要几秒到十几秒。
+/// NSWorkspace 直接给已解码的图标，因此也覆盖了 Asset Catalog
+/// （`Assets.car`）的应用，不再局限于有独立 `.icns` 的旧式应用。
+///
+/// 任何一步失败都返回空 map，界面按无图标处理，不影响列表展示。
+pub fn read_icons_base64(paths: &[String]) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+
+    let mut icons: HashMap<String, String> = HashMap::new();
+    if paths.is_empty() {
+        return icons;
+    }
+
+    // 32 逻辑像素：Retina 下 NSImage 会产出 64×64 的位图，列表足够清晰，
+    // 单张 PNG 约 6KB，90 个应用合计约 500KB。
+    const ICON_SIZE: u32 = 32;
+
+    let script = r#"
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+const args = $.NSProcessInfo.processInfo.arguments;
+const size = Number(ObjC.unwrap(args.objectAtIndex(4))) || 32;
+const paths = [];
+for (let i = 5; i < args.count; i++) paths.push(ObjC.unwrap(args.objectAtIndex(i)));
+const results = [];
+for (const p of paths) {
+  try {
+    const icon = $.NSWorkspace.sharedWorkspace.iconForFile($.NSString.stringWithString(p));
+    const img = $.NSImage.alloc.initWithSize($.NSMakeSize(size, size));
+    img.lockFocus;
+    icon.drawInRectFromRectOperationFraction(
+      $.NSMakeRect(0, 0, size, size), $.NSZeroRect, $.NSCompositeCopy, 1.0);
+    img.unlockFocus;
+    const rep = $.NSBitmapImageRep.imageRepWithData(img.TIFFRepresentation);
+    const png = rep.representationUsingTypeProperties($.NSPNGFileType, $());
+    results.push({ path: p, data: ObjC.unwrap(png.base64EncodedStringWithOptions(0)) });
+  } catch (e) {
+    results.push({ path: p, data: null });
+  }
+}
+JSON.stringify(results);
+"#;
+
+    let mut cmd = Command::new("osascript");
+    cmd.arg("-l").arg("JavaScript").arg("-e").arg(script);
+    cmd.arg(ICON_SIZE.to_string());
+    for path in paths {
+        cmd.arg(path);
+    }
+
+    let Ok(out) = cmd.output() else {
+        return icons;
+    };
+    if !out.status.success() {
+        return icons;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct IconResult {
+        path: String,
+        data: Option<String>,
+    }
+
+    let Ok(parsed) = serde_json::from_slice::<Vec<IconResult>>(&out.stdout) else {
+        return icons;
+    };
+
+    for item in parsed {
+        if let Some(data) = item.data {
+            if !data.is_empty() {
+                icons.insert(item.path, data);
+            }
+        }
+    }
+    icons
+}
+
+/// 列出已安装应用，按体积从大到小排序，并附带图标。
 pub fn list_apps() -> Vec<App> {
     let mut apps: Vec<App> = Vec::new();
 
@@ -237,6 +320,14 @@ pub fn list_apps() -> Vec<App> {
     apps.dedup_by(|a, b| a.path == b.path);
 
     apps.sort_by(|a, b| b.size.cmp(&a.size));
+
+    // 图标在所有应用收集完毕后一次性批量取，避免 N 次子进程调用。
+    let paths: Vec<String> = apps.iter().map(|a| a.path.clone()).collect();
+    let icons = read_icons_base64(&paths);
+    for app in apps.iter_mut() {
+        app.icon_png_base64 = icons.get(&app.path).cloned();
+    }
+
     apps
 }
 
@@ -335,6 +426,36 @@ mod tests {
         for pair in apps.windows(2) {
             assert!(pair[0].size >= pair[1].size);
         }
+    }
+
+    #[test]
+    fn list_apps_attaches_icons() {
+        // 列表页要显示应用图标，因此 list_apps 必须回填 icon_png_base64。
+        // 机器上无 GUI 会话时 osascript 可能取不到图标，这里只要求
+        // 「要么有图标，要么为空」，不允许 panic 或产出非法值。
+        let apps = list_apps();
+        let with_icon = apps.iter().filter(|a| a.icon_png_base64.is_some()).count();
+        if apps.is_empty() {
+            return;
+        }
+        for app in &apps {
+            if let Some(data) = &app.icon_png_base64 {
+                assert!(!data.is_empty(), "图标 base64 不应为空串");
+                // PNG 的 base64 以 iVBORw0KGgo 开头。
+                assert!(
+                    data.starts_with("iVBORw0KGgo"),
+                    "{} 的图标不是 PNG：{}",
+                    app.name,
+                    &data[..data.len().min(24)]
+                );
+            }
+        }
+        // 有 GUI 会话时绝大多数应用都应能取到图标。
+        assert!(
+            with_icon * 2 >= apps.len(),
+            "只有 {with_icon}/{} 个应用取到图标，低于半数说明批量取图标失效",
+            apps.len()
+        );
     }
 
     #[test]

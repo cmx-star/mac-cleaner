@@ -96,9 +96,21 @@ export interface NetInterface {
 
 export interface Thermal {
   cpu_temp: number;
+  gpu_temp: number;
   fan_speed: number;
   system_power: number;
 }
+
+export interface Fan {
+  rpm: number;
+  target_rpm: number;
+  min_rpm: number;
+  max_rpm: number;
+  forced: boolean;
+  index: number;
+}
+
+export type FanMode = { auto: null } | { manual: number };
 
 export interface ProcessInfo {
   pid: number;
@@ -109,6 +121,8 @@ export interface ProcessInfo {
   exe: string | null;
   /** 所属 .app bundle 路径，取不到为 null。 */
   bundle_path: string | null;
+  /** 所属 App 的图标（PNG base64），取不到为 null。 */
+  icon_png_base64: string | null;
 }
 
 export interface Snapshot {
@@ -138,6 +152,7 @@ export interface App {
   size_display: string;
   version: string;
   last_used_days_ago: number | null;
+  icon_png_base64: string | null;
   protected: boolean;
   protection_reason: string | null;
 }

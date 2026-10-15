@@ -5,6 +5,8 @@ import type {
   AppDataPath,
   CleanupPreview,
   CliLocation,
+  Fan,
+  FanMode,
   ProcessInfo,
   CommandOutput,
   History,
@@ -55,6 +57,14 @@ export function runOptimize(dryRun: boolean): Promise<CommandOutput> {
 
 export function classifyPath(path: string): Promise<{ protection: Protection; reason: string | null }> {
   return invoke("classify_path", { path });
+}
+
+export function fanStatus(): Promise<Fan[]> {
+  return invoke("fan_status");
+}
+
+export function setFan(mode: FanMode): Promise<void> {
+  return invoke("set_fan", { mode });
 }
 
 export function appIcon(bundleId: string): Promise<string | null> {

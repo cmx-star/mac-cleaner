@@ -131,12 +131,18 @@ pub async fn read_whitelist() -> Result<Vec<String>, String> {
         .map_err(|e| format!("读取保护名单异常：{e}"))
 }
 
-/// 读取单个应用图标（PNG base64）。
+/// 读取全部风扇。
 #[tauri::command]
-pub async fn app_icon(bundle_id: String) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::apps::app_icon(&bundle_id))
+pub async fn fan_status() -> Result<Vec<crate::smc::Fan>, String> {
+    tauri::async_runtime::spawn_blocking(crate::smc::fans)
         .await
-        .map_err(|e| format!("图标读取异常：{e}"))
+        .map_err(|e| format!("风扇读取异常：{e}"))
+}
+
+/// 设置风扇模式（自动 / 手动转速）。需要已安装 setuid 的 fanctl 助手。
+#[tauri::command]
+pub async fn set_fan(mode: crate::smc::FanMode) -> Result<(), String> {
+    crate::smc::set_fan_mode(mode).await
 }
 
 /// 进程列表条目。
@@ -152,8 +158,6 @@ pub struct ProcessInfo {
     pub exe: Option<String>,
     /// 所属 .app bundle 路径（能从 exe 反查到才有）。
     pub bundle_path: Option<String>,
-    /// 所属 App 的图标（PNG base64）。
-    pub icon_png_base64: Option<String>,
 }
 
 /// 从可执行文件路径反查所属 `.app` bundle。
@@ -201,7 +205,6 @@ pub async fn top_processes(
                 cpu_percent: p.cpu_usage(),
                 exe,
                 bundle_path,
-                icon_png_base64: None,
             }
         })
         .collect();
@@ -210,21 +213,6 @@ pub async fn top_processes(
     procs.retain(|p| p.memory > 0);
     procs.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
     procs.truncate(limit);
-
-    // 截断之后再取图标：只为真正展示的这几行起一次 osascript，
-    // 不给全部进程都查图标。
-    let bundles: Vec<String> = procs
-        .iter()
-        .filter_map(|p| p.bundle_path.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    let icons = crate::apps::read_icons_base64(&bundles);
-    for p in procs.iter_mut() {
-        if let Some(bundle) = &p.bundle_path {
-            p.icon_png_base64 = icons.get(bundle).cloned();
-        }
-    }
 
     Ok(procs)
 }

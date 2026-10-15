@@ -11,7 +11,6 @@ pub mod safety;
 pub mod scan;
 pub mod smc;
 pub mod status;
-pub mod trash;
 
 use commands::Collector;
 
@@ -34,6 +33,8 @@ pub fn run() {
             commands::run_optimize,
             commands::read_whitelist,
             commands::classify_path,
+            commands::fan_status,
+            commands::set_fan,
             commands::app_icon,
             commands::top_processes,
         ])
