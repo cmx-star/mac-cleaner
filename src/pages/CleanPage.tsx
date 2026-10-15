@@ -24,7 +24,6 @@ export default function CleanPage() {
   const [running, setRunning] = useState(false);
   const [runningName, setRunningName] = useState<string | null>(null);
   const [result, setResult] = useState<CommandOutput | null>(null);
-  const [showCliHint, setShowCliHint] = useState(false);
   const t = useT();
 
   // 扫描中轮播展示常见缓存目录，让等待有「在推进」的感觉。
@@ -79,11 +78,7 @@ export default function CleanPage() {
       setResult(real);
       await load();
     } catch (e) {
-      const message = String(e);
-      setError(message);
-      if (message.includes("没有找到") || message.includes("install")) {
-        setShowCliHint(true);
-      }
+      setError(String(e));
     } finally {
       setRunning(false);
       setRunningName(null);
@@ -113,7 +108,6 @@ export default function CleanPage() {
       <div className="page-subtitle">{t("clean.subtitle")}</div>
 
       {error && <div className="error-box">{error}</div>}
-      {showCliHint && <div className="hint-box">{t("clean.cliHint")}</div>}
 
       {preview && (
         <>

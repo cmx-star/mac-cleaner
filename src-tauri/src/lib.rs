@@ -1,9 +1,10 @@
-//! Talpa 桌面版后端。
+//! Talpa / Mole 桌面版后端。
 //!
-//! 分工：只读能力（扫描、状态、应用列表、历史）在本进程内实现；
-//! 破坏性操作（清理、卸载、优化）转发给 Mole CLI，由它的安全层执行。
+//! 全量核心能力（状态监控、磁盘扫描、应用卸载、缓存清理、优化维护等）
+//! 均使用纯 Rust 原生实现，不依赖外部 CLI。
 
 pub mod apps;
+pub mod clean;
 pub mod cli;
 pub mod commands;
 pub mod history;
@@ -11,8 +12,8 @@ pub mod safety;
 pub mod scan;
 pub mod smc;
 pub mod startup;
-pub mod trash;
 pub mod status;
+pub mod trash;
 
 use commands::Collector;
 
@@ -39,6 +40,15 @@ pub fn run() {
             commands::set_startup_item,
             commands::open_login_items_settings,
             commands::classify_path,
+            commands::fan_status,
+            commands::set_fan,
+            commands::app_icon,
+            commands::top_processes,
+            commands::trash_paths,
+            commands::toggle_low_latency,
+            commands::kill_process,
+            commands::reveal_in_finder,
+            commands::process_detail,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Talpa 桌面版失败");

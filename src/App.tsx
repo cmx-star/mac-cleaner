@@ -52,15 +52,24 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          {cli?.found ? (
-            <span className="cli-badge ok" title={cli.path ?? ""}>
-              {cli.version ?? t("sidebar.cliMissing")}
-            </span>
-          ) : (
-            <span className="cli-badge missing" title={cli?.install_hint ?? ""}>
-              {t("sidebar.cliMissing")}
-            </span>
-          )}
+          <span
+            className="cli-badge ok"
+            title={cli?.path ? `${cli.path} · 原生引擎` : "原生安全引擎已就绪"}
+            style={{ display: "inline-flex", alignItems: "center" }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "var(--green)",
+                display: "inline-block",
+                marginRight: 6,
+                boxShadow: "0 0 6px rgba(77, 182, 172, 0.6)",
+              }}
+            />
+            {cli?.version || "原生引擎"}
+          </span>
         </div>
       </aside>
       <main className="content">
