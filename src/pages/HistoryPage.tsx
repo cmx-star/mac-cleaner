@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { readHistory } from "../api";
+import { useT } from "../i18n";
+import { Spinner } from "../components/Loading";
 import type { History } from "../types";
 
 export default function HistoryPage() {
   const [history, setHistory] = useState<History | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const t = useT();
 
   const load = useCallback(async () => {
     try {
@@ -20,33 +23,29 @@ export default function HistoryPage() {
   }, [load]);
 
   if (error) return <div className="error-box">{error}</div>;
-  if (!history) return <div className="loading pulse">正在读取历史…</div>;
+  if (!history) return <Spinner label={t("common.loading")} />;
 
   const hasContent = history.sessions.length > 0 || history.deletions.length > 0;
 
   return (
     <div className="page">
-      <div className="page-title">历史</div>
-      <div className="page-subtitle">
-        来自 Mole 的操作日志，记录每一次清理与删除的痕迹。
-      </div>
+      <div className="page-title">{t("history.title")}</div>
+      <div className="page-subtitle">{t("history.subtitle")}</div>
 
       {!hasContent ? (
-        <div className="empty">
-          还没有操作记录。执行一次清理或卸载后，这里会显示发生了什么。
-        </div>
+        <div className="empty">{t("history.empty")}</div>
       ) : (
         <>
           {history.sessions.length > 0 && (
             <div className="panel">
-              <div className="panel-title">清理会话</div>
+              <div className="panel-title">{t("history.sessions")}</div>
               {history.sessions.map((s, i) => (
                 <div key={i} className="row">
                   <div className="row-main">
                     <div className="row-name">
                       {s.command}
-                      <span className="tag blue">{s.items} 项</span>
-                      {s.failed > 0 && <span className="tag red">{s.failed} 失败</span>}
+                      <span className="tag blue">{t("history.items", { count: s.items })}</span>
+                      {s.failed > 0 && <span className="tag red">{t("history.failed", { count: s.failed })}</span>}
                     </div>
                     <div className="row-path">
                       {s.started_at}
@@ -61,7 +60,7 @@ export default function HistoryPage() {
 
           {history.deletions.length > 0 && (
             <div className="panel">
-              <div className="panel-title">删除记录</div>
+              <div className="panel-title">{t("history.deletions")}</div>
               {history.deletions.map((d, i) => (
                 <div key={i} className="row">
                   <div className="row-main">
@@ -81,12 +80,13 @@ export default function HistoryPage() {
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <button className="button secondary" onClick={load}>
-          刷新
+          {t("common.refresh")}
         </button>
       </div>
       <div style={{ color: "var(--text-dim)", fontSize: 11, marginTop: 8 }}>
-        日志位置：{history.operations_log}
+        {t("history.logAt", { path: history.operations_log })}
       </div>
     </div>
   );
 }
+

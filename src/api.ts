@@ -5,15 +5,15 @@ import type {
   AppDataPath,
   CleanupPreview,
   CliLocation,
+  CommandOutput,
   Fan,
   FanMode,
-  ProcessInfo,
-  CommandOutput,
   History,
-  StartupItem,
+  ProcessInfo,
   Protection,
   ScanResult,
   Snapshot,
+  StartupItem,
 } from "./types";
 
 export function scanDirectory(path: string): Promise<ScanResult> {

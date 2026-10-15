@@ -1,6 +1,8 @@
-import { useCallback, useState } from "react";
-import { scanDirectory } from "../api";
+import { useCallback, useEffect, useState } from "react";
+import { homeDir, scanDirectory } from "../api";
 import { humanBytes } from "../api";
+import { useT } from "../i18n";
+import { ScanProgress, InlineSpinner, useRotatingDetail } from "../components/Loading";
 import type { ScanResult } from "../types";
 
 export default function AnalyzePage() {
@@ -9,9 +11,29 @@ export default function AnalyzePage() {
   const [history, setHistory] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [scanningPath, setScanningPath] = useState("");
+  const t = useT();
+
+  // 进入页面填入主目录作为默认路径，但不自动扫描，由用户点「分析」触发。
+  useEffect(() => {
+    homeDir()
+      .then((dir) => {
+        if (dir) setPath((current) => (current === "" ? dir : current));
+      })
+      .catch(() => {
+        // 取不到主目录时保留空输入，用户自己填。
+      });
+  }, []);
+
+  // 扫描中轮播的目录名细节，让深层扫描有推进感。
+  const rotating = useRotatingDetail(
+    scanning ? ["扫描目录", "统计体积", "识别构建产物", "检查大文件"] : [],
+    900,
+  );
 
   const analyze = useCallback(async (target: string, pushHistory = true) => {
     setScanning(true);
+    setScanningPath(target);
     setError(null);
     try {
       const r = await scanDirectory(target);
@@ -38,27 +60,32 @@ export default function AnalyzePage() {
 
   return (
     <div className="page">
-      <div className="page-title">磁盘分析</div>
-      <div className="page-subtitle">
-        输入路径查看逐层占用。构建产物（node_modules、target、DerivedData 等）会被标出，
-        删掉重编译就能恢复。
-      </div>
+      <div className="page-title">{t("analyze.title")}</div>
+      <div className="page-subtitle">{t("analyze.subtitle")}</div>
 
       <form
         className="toolbar"
         onSubmit={(e) => {
           e.preventDefault();
-          if (path.trim()) analyze(path.trim());
+          const target = path.trim();
+          if (!target) {
+            // 空输入不静默无反应：明确提示而不是让用户以为按钮失灵。
+            setError(t("analyze.emptyPath"));
+            return;
+          }
+          analyze(target);
         }}
       >
         <input
           className="input"
-          placeholder="/Users/you/Projects"
+          placeholder={t("analyze.placeholder")}
           value={path}
           onChange={(e) => setPath(e.target.value)}
+          disabled={scanning}
         />
         <button className="button" type="submit" disabled={scanning}>
-          分析
+          {scanning && <InlineSpinner />}
+          {scanning ? t("analyze.scanningShort") : t("analyze.go")}
         </button>
       </form>
 
@@ -78,7 +105,17 @@ export default function AnalyzePage() {
       )}
 
       {error && <div className="error-box">{error}</div>}
-      {scanning && <div className="loading pulse">正在扫描…</div>}
+      {scanning && (
+        <ScanProgress
+          phases={[
+            {
+              step: t("analyze.scanning", { path: scanningPath }),
+              detail: rotating ?? undefined,
+            },
+          ]}
+          active={0}
+        />
+      )}
 
       {result && !scanning && (
         <>
@@ -87,7 +124,7 @@ export default function AnalyzePage() {
               <span>{result.path}</span>
               <span>
                 {humanBytes(result.total_size)} · {result.total_files} 项
-                {result.scan_status === "partial" && " · 部分扫描"}
+                {result.scan_status === "partial" && ` · ${t("analyze.partial")}`}
               </span>
             </div>
             {result.entries.map((e) => (
@@ -101,14 +138,14 @@ export default function AnalyzePage() {
                   <div className="row-name">
                     {e.is_dir ? "▸ " : "  "}
                     {e.name}
-                    {e.is_build_artifact && <span className="tag green">构建产物</span>}
+                    {e.is_build_artifact && <span className="tag green">{t("analyze.buildArtifact")}</span>}
                     {e.protection_reason && (
                       <span className="tag red" title={e.path}>
                         {e.protection_reason}
                       </span>
                     )}
                     {e.age_days !== null && e.age_days >= 90 && (
-                      <span className="tag yellow">90 天未动</span>
+                      <span className="tag yellow">{t("analyze.stale", { days: e.age_days })}</span>
                     )}
                   </div>
                 </div>
@@ -119,13 +156,13 @@ export default function AnalyzePage() {
 
           <div style={{ display: "flex", gap: 8 }}>
             <button className="button secondary" onClick={goUp}>
-              返回上级
+              {t("analyze.up")}
             </button>
           </div>
 
           {result.large_files.length > 0 && (
             <div className="panel" style={{ marginTop: 16 }}>
-              <div className="panel-title">大文件（超过 500MB，已排除受保护项）</div>
+              <div className="panel-title">{t("analyze.largeFiles")}</div>
               {result.large_files.map((f) => (
                 <div key={f.path} className="row">
                   <div className="row-main">
@@ -142,3 +179,4 @@ export default function AnalyzePage() {
     </div>
   );
 }
+

@@ -11,6 +11,7 @@ pub mod safety;
 pub mod scan;
 pub mod smc;
 pub mod startup;
+pub mod trash;
 pub mod status;
 
 use commands::Collector;
