@@ -12,6 +12,16 @@ import {
 } from "../api";
 import { useT } from "../i18n";
 import { Spinner, InlineSpinner } from "../components/Loading";
+import {
+  HealthIcon,
+  CpuIcon,
+  GpuIcon,
+  MemoryIcon,
+  ThermalIcon,
+  DiskIcon,
+  NetworkIcon,
+  FanIcon,
+} from "../components/Icons";
 import type { Fan, FanMode, ProcessDetail, ProcessInfo, Snapshot } from "../types";
 
 /** 每核心占用柱状图。按占用率着色。 */
@@ -739,7 +749,10 @@ export default function StatusPage() {
       <div className="stat-grid">
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label">{t("status.health")}</span>
+            <span className="label">
+              <HealthIcon />
+              <span>{t("status.health")}</span>
+            </span>
             <span className="spacer" />
             <span className="stat-chip">{snap.hardware.model}</span>
           </div>
@@ -760,7 +773,10 @@ export default function StatusPage() {
 
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label">{t("status.cpuLabel")}</span>
+            <span className="label">
+              <CpuIcon />
+              <span>{t("status.cpuLabel")}</span>
+            </span>
             <span className="spacer" />
             {cpuTemp > 0 && <span className="stat-chip">{cpuTemp.toFixed(0)}°C</span>}
           </div>
@@ -781,7 +797,10 @@ export default function StatusPage() {
 
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label">{t("status.gpuLabel")}</span>
+            <span className="label">
+              <GpuIcon />
+              <span>{t("status.gpuLabel")}</span>
+            </span>
             <span className="spacer" />
             {gpuTemp > 0 && <span className="stat-chip">{gpuTemp.toFixed(0)}°C</span>}
           </div>
@@ -801,7 +820,10 @@ export default function StatusPage() {
 
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label">{t("status.memory")}</span>
+            <span className="label">
+              <MemoryIcon />
+              <span>{t("status.memory")}</span>
+            </span>
             <span className="spacer" />
             <span className={`stat-chip ${memPressure.cls}`}>
               {t(`status.${memPressure.key}`)}
@@ -826,10 +848,8 @@ export default function StatusPage() {
       <div className="stat-grid">
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--red)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z" />
-              </svg>
+            <span className="label">
+              <ThermalIcon />
               <span>{t("status.thermal")}</span>
             </span>
             <span className="spacer" />
@@ -928,7 +948,10 @@ export default function StatusPage() {
 
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label">{t("status.freeSpace")}</span>
+            <span className="label">
+              <DiskIcon />
+              <span>{t("status.freeSpace")}</span>
+            </span>
             <span className="spacer" />
             {primaryDisk && <span className="stat-chip">{humanBytes(primaryDisk.total)}</span>}
           </div>
@@ -966,12 +989,8 @@ export default function StatusPage() {
           }}
         >
           <div className="stat-card-head">
-            <span className="label" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="2" y1="12" x2="22" y2="12" />
-                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-              </svg>
+            <span className="label">
+              <NetworkIcon isWifi={isWifi} />
               <span>{t("status.network")}</span>
             </span>
             <span className="spacer" />
@@ -1114,14 +1133,8 @@ export default function StatusPage() {
 
         <div className="stat-card">
           <div className="stat-card-head">
-            <span className="label" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 12c-2.8 0-5-2.2-5-5 0-2.2 1.8-4 4-4 3.9 0 6 4.1 4.5 7.5L12 12z" />
-                <path d="M12 12c0-2.8 2.2-5 5-5 2.2 0 4 1.8 4 4 0 3.9-4.1 6-7.5 4.5L12 12z" />
-                <path d="M12 12c2.8 0 5 2.2 5 5 0 2.2-1.8 4-4 4-3.9 0-6-4.1-4.5-7.5L12 12z" />
-                <path d="M12 12c0 2.8-2.2 5-5 5-2.2 0-4-1.8-4-4 0-3.9 4.1-6 7.5-4.5L12 12z" />
-                <circle cx="12" cy="12" r="2" fill="currentColor" />
-              </svg>
+            <span className="label">
+              <FanIcon />
               <span>{t("status.fan")}</span>
             </span>
             <span className="spacer" />

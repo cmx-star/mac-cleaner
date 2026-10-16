@@ -332,6 +332,9 @@ body {
 
 .stat-card-head .label {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .stat-card-head .spacer {
