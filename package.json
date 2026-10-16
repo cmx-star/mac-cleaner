@@ -2,6 +2,7 @@
   "name": "talpa-desktop",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@12.11.2",
   "type": "module",
   "description": "Talpa 桌面版 - 基于 Mole CLI 的 Mac 清理与维护界面",
   "scripts": {
