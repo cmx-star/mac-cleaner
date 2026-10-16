@@ -16,25 +16,41 @@ use std::path::PathBuf;
 
 /// 执行智能系统清理（纯 Rust 原生实现）。
 ///
+/// `target_paths` 为选定的待清理路径列表；为 None 或空时默认处理全部安全可再生项目。
 /// `dry_run` 为 true 时只做模拟检查与空间预估，不实际移动任何文件；
-/// `dry_run` 为 false 时将可安全再生的缓存项移入废纸篓。
-pub async fn clean_system(dry_run: bool) -> Result<crate::cli::CommandOutput, String> {
+/// `dry_run` 为 false 时将选中的安全缓存项移入废纸篓。
+pub async fn clean_system(
+    target_paths: Option<Vec<String>>,
+    dry_run: bool,
+) -> Result<crate::cli::CommandOutput, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let preview = scan::scan_cleanup_candidates()
             .map_err(|e| format!("扫描清理候选失败：{e}"))?;
 
-        // 仅处理可再生的安全缓存项
+        let path_filter: Option<std::collections::HashSet<String>> = target_paths
+            .filter(|p| !p.is_empty())
+            .map(|list| list.into_iter().collect());
+
+        // 仅处理可再生的安全缓存项，且符合选中的路径范围
         let regenerable_items: Vec<_> = preview
             .items
             .into_iter()
-            .filter(|item| item.tier == Tier::Regenerable && !item.protection.is_protected())
+            .filter(|item| {
+                if item.tier != Tier::Regenerable || item.protection.is_protected() {
+                    return false;
+                }
+                match &path_filter {
+                    Some(set) => set.contains(&item.path),
+                    None => true,
+                }
+            })
             .collect();
 
         if regenerable_items.is_empty() {
             return Ok(crate::cli::CommandOutput {
                 success: true,
                 exit_code: Some(0),
-                stdout: "系统非常整洁，暂未发现可安全释放的缓存或临时文件。".to_string(),
+                stdout: "未选中任何可清理项，或所选项目已被清理。".to_string(),
                 stderr: String::new(),
             });
         }
@@ -197,7 +213,7 @@ mod tests {
     #[test]
     fn clean_system_dry_run_never_panics() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let res = rt.block_on(clean_system(true));
+        let res = rt.block_on(clean_system(None, true));
         assert!(res.is_ok());
     }
 

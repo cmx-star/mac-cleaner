@@ -65,8 +65,8 @@ export function cliStatus(): Promise<CliLocation> {
   return invoke("cli_status");
 }
 
-export function runClean(dryRun: boolean): Promise<CommandOutput> {
-  return invoke("run_clean", { dryRun });
+export function runClean(dryRun: boolean = false, paths?: string[] | null): Promise<CommandOutput> {
+  return invoke("run_clean", { paths: paths ?? null, dryRun });
 }
 
 export function runUninstall(appName: string, dryRun: boolean): Promise<CommandOutput> {

@@ -312,30 +312,211 @@ fn find_large_files(root: &Path, whitelist: &[String]) -> Vec<Entry> {
 }
 
 /// 扫描用户主目录，产出清理预览候选。
+/// 归类清理候选项目，并提取友好名称与建议状态。
+/// 返回：(category, recommended, display_name, description)
+pub fn classify_category(name: &str, path: &str) -> (&'static str, bool, Option<String>, Option<String>) {
+    let lower_name = name.to_lowercase();
+    let lower_path = path.to_lowercase();
+
+    // 1. 通讯工具 (Communication Apps)
+    // 聊天 App 缓存，旧图片视频清理后需重新下载，过期的找不回。
+    // 默认 recommended = false，避免用户在不知情下清除微信/QQ等重要聊天媒体。
+    if lower_name.contains("wechat") || lower_name.contains("xinwechat") || lower_name.contains("wework")
+        || lower_name.contains("tencent.qq") || lower_name == "qq" || lower_name.contains("com.tencent.qq")
+        || lower_name.contains("lark") || lower_name.contains("feishu")
+        || lower_name.contains("dingtalk")
+        || lower_name.contains("telegram")
+        || lower_name.contains("slack")
+        || lower_name.contains("discord")
+        || lower_name.contains("teams")
+        || lower_name.contains("whatsapp")
+        || lower_name.contains("zoom")
+        || lower_name.contains("skype")
+        || lower_name.contains("line")
+    {
+        let display = if lower_name.contains("xinwechat") || lower_name.contains("wechat") {
+            "微信缓存与临时文件"
+        } else if lower_name.contains("wework") {
+            "企业微信缓存"
+        } else if lower_name.contains("qq") {
+            "QQ 缓存与媒体文件"
+        } else if lower_name.contains("lark") || lower_name.contains("feishu") {
+            "飞书缓存"
+        } else if lower_name.contains("dingtalk") {
+            "钉钉缓存"
+        } else if lower_name.contains("telegram") {
+            "Telegram 媒体缓存"
+        } else if lower_name.contains("slack") {
+            "Slack 工作区缓存"
+        } else if lower_name.contains("discord") {
+            "Discord 社区缓存"
+        } else if lower_name.contains("teams") {
+            "Microsoft Teams 缓存"
+        } else if lower_name.contains("whatsapp") {
+            "WhatsApp 缓存"
+        } else if lower_name.contains("zoom") {
+            "Zoom 会议临时文件"
+        } else {
+            "通讯工具聊天缓存"
+        };
+        return (
+            "communication",
+            false,
+            Some(display.to_string()),
+            Some("聊天 App 缓存，旧图片视频清理后需重新下载，过期的找不回".to_string()),
+        );
+    }
+
+    // 2. 开发工具 (Developer Tools)
+    // Xcode、SwiftPM、Node.js、Rust、Python、Gradle 等工具缓存。清理后可自动重生成。
+    if lower_name.contains("deriveddata") || lower_path.contains("deriveddata")
+        || lower_name.contains("xcode") || lower_name.contains("swiftpm") || lower_name.contains("coresimulator")
+        || lower_name.contains("cocoapods") || lower_name == "homebrew" || lower_name.contains("brew")
+        || lower_name.contains("npm") || lower_name.contains("pnpm") || lower_name.contains("yarn")
+        || lower_name.contains("cargo") || lower_name.contains("rustup") || lower_name.contains("target")
+        || lower_name.contains("gradle") || lower_name.contains("android")
+        || lower_name.contains("pip") || lower_name.contains("uv") || lower_name.contains("conda")
+        || lower_name.contains("vscode") || lower_name.contains("cursor") || lower_name.contains("antigravity")
+        || lower_name.contains("jetbrains") || lower_name.contains("node")
+    {
+        let display = if lower_name.contains("deriveddata") || lower_path.contains("deriveddata") {
+            "Xcode DerivedData (构建产物与索引)"
+        } else if lower_name.contains("xcode") {
+            "Xcode 缓存与符号"
+        } else if lower_name.contains("swiftpm") {
+            "SwiftPM 依赖包缓存"
+        } else if lower_name.contains("homebrew") {
+            "Homebrew 安装包下载缓存"
+        } else if lower_name.contains("cocoapods") {
+            "CocoaPods 依赖下载缓存"
+        } else if lower_name.contains("pnpm") {
+            "pnpm 全局模块缓存"
+        } else if lower_name.contains("npm") {
+            "npm 模块缓存"
+        } else if lower_name.contains("yarn") {
+            "Yarn 包管理缓存"
+        } else if lower_name.contains("cargo") {
+            "Cargo 编译与注册表缓存"
+        } else if lower_name.contains("gradle") {
+            "Gradle 构建与依赖缓存"
+        } else if lower_name.contains("pip") {
+            "Python pip 缓存"
+        } else if lower_name.contains("antigravity") {
+            "Antigravity IDE 缓存"
+        } else if lower_name.contains("cursor") {
+            "Cursor 编辑器缓存"
+        } else if lower_name.contains("vscode") {
+            "VS Code 编辑器缓存"
+        } else {
+            "开发与编译构建缓存"
+        };
+        return (
+            "developer",
+            true,
+            Some(display.to_string()),
+            Some("Xcode、SwiftPM、Node.js 等工具的缓存，清理后首次构建会稍慢".to_string()),
+        );
+    }
+
+    // 3. 系统数据 (System Data)
+    // 系统缓存、诊断日志、临时文件
+    if lower_path.contains("/library/logs") || lower_name.contains("diagnosticreports")
+        || lower_name.contains("temporaryitems") || lower_name.contains("quicklook")
+        || lower_name.contains("coresymbolicationd") || lower_name.contains("crashreporter")
+        || lower_name.contains("cache_delete")
+        || (lower_name.starts_with("com.apple.") && (lower_name.ends_with('d') || lower_name.ends_with("agent")))
+    {
+        let display = if lower_name.contains("diagnosticreports") {
+            "系统崩溃与诊断报告".to_string()
+        } else if lower_path.contains("/library/logs") {
+            format!("{name} 运行日志")
+        } else if lower_name.contains("temporaryitems") {
+            "系统临时工作区残留".to_string()
+        } else if lower_name.contains("quicklook") {
+            "访达快速查看缓存".to_string()
+        } else if lower_name.contains("coresymbolicationd") {
+            "系统调试符号缓存".to_string()
+        } else {
+            "系统与守护进程缓存".to_string()
+        };
+        return (
+            "system",
+            true,
+            Some(display),
+            Some("系统缓存、诊断日志和本地快照".to_string()),
+        );
+    }
+
+    // 4. App 缓存与日志 (App Caches & Logs)
+    let display = if lower_name.contains("chrome") {
+        "Google Chrome 网页缓存".to_string()
+    } else if lower_name.contains("safari") {
+        "Safari 网页缓存与图标".to_string()
+    } else if lower_name.contains("edge") {
+        "Microsoft Edge 缓存".to_string()
+    } else if lower_name.contains("spotify") {
+        "Spotify 音乐缓存".to_string()
+    } else if lower_name.contains("cloudkit") {
+        "CloudKit 同步缓存".to_string()
+    } else if lower_name.contains("baidunetdisk") {
+        "百度网盘缓存".to_string()
+    } else if let Some(stripped) = name.strip_prefix("com.") {
+        let parts: Vec<&str> = stripped.split('.').collect();
+        let simple_name = parts.last().unwrap_or(&name);
+        format!("{simple_name} 缓存")
+    } else {
+        format!("{name} 缓存")
+    };
+
+    (
+        "app",
+        true,
+        Some(display),
+        Some("App、浏览器和云盘缓存及旧日志，保留登录状态和浏览记录".to_string()),
+    )
+}
+
+/// 扫描用户主目录，产出清理预览候选。
 ///
 /// 这里复刻的是 Mole 清理的分类思路：按「可再生 / 重建代价高 / 不可替代」
-/// 三档归类，而不是直接给出可删清单。界面据此让用户自己判断。
+/// 三档归类，并根据功能划分为四大分类（App 缓存、通讯工具、开发工具、系统数据）。
 pub fn scan_cleanup_candidates() -> Result<CleanupPreview, String> {
     let home = safety::home_dir().ok_or("无法确定用户主目录")?;
     let whitelist = safety::load_whitelist();
     let mut items: Vec<CleanupItem> = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
 
-    // 用户缓存：~/.cache 与 ~/Library/Caches 下的直接子项。
-    let cache_roots = [
-        format!("{home}/Library/Caches"),
-        format!("{home}/.cache"),
+    // 扫描根目录列表
+    let mut cache_roots = vec![
+        PathBuf::from(format!("{home}/Library/Caches")),
+        PathBuf::from(format!("{home}/.cache")),
+        PathBuf::from(format!("{home}/Library/Logs")),
     ];
 
-    for root in &cache_roots {
-        let root_path = PathBuf::from(root);
-        let Ok(read_dir) = std::fs::read_dir(&root_path) else {
+    let derived_data = PathBuf::from(format!("{home}/Library/Developer/Xcode/DerivedData"));
+    if derived_data.exists() {
+        cache_roots.push(derived_data);
+    }
+
+    for root_path in &cache_roots {
+        let Ok(read_dir) = std::fs::read_dir(root_path) else {
             continue;
         };
         for child in read_dir.filter_map(Result::ok) {
             let path = child.path();
+            let path_str = path.to_string_lossy().into_owned();
+            if !seen_paths.insert(path_str.clone()) {
+                continue;
+            }
+
             let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                 continue;
             };
+
+            // 忽略隐藏的 .DS_Store 等临时文件
+            if name.starts_with('.') && name != ".cache" {
+                continue;
+            }
 
             let protection = safety::classify(&path, &whitelist);
             let tier = match protection {
@@ -359,11 +540,17 @@ pub fn scan_cleanup_candidates() -> Result<CleanupPreview, String> {
                 continue;
             }
 
+            let (category, recommended, display_name, description) = classify_category(&name, &path_str);
+
             items.push(CleanupItem {
                 name,
-                path: path.to_string_lossy().into_owned(),
+                display_name,
+                path: path_str,
                 size,
                 tier,
+                category: category.to_string(),
+                recommended,
+                description,
                 protection,
                 protection_reason: protection.reason().map(str::to_string),
                 age_days: age_days(&path),
@@ -415,9 +602,13 @@ impl Tier {
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupItem {
     pub name: String,
+    pub display_name: Option<String>,
     pub path: String,
     pub size: u64,
     pub tier: Tier,
+    pub category: String,
+    pub recommended: bool,
+    pub description: Option<String>,
     pub protection: Protection,
     pub protection_reason: Option<String>,
     pub age_days: Option<u64>,

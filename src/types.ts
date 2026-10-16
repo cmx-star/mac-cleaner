@@ -36,9 +36,13 @@ export interface ScanResult {
 
 export interface CleanupItem {
   name: string;
+  display_name?: string | null;
   path: string;
   size: number;
   tier: Tier;
+  category: "app" | "communication" | "developer" | "system" | string;
+  recommended: boolean;
+  description?: string | null;
   protection: Protection;
   protection_reason: string | null;
   age_days: number | null;

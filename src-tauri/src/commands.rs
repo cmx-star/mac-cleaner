@@ -159,8 +159,8 @@ pub async fn cli_status() -> Result<cli::CliLocation, String> {
 
 /// 执行清理（纯 Rust 原生实现，不依赖外部 CLI）。
 #[tauri::command]
-pub async fn run_clean(dry_run: bool) -> Result<cli::CommandOutput, String> {
-    clean::clean_system(dry_run).await
+pub async fn run_clean(paths: Option<Vec<String>>, dry_run: bool) -> Result<cli::CommandOutput, String> {
+    clean::clean_system(paths, dry_run).await
 }
 
 /// 卸载应用（纯 Rust 实现，不依赖 Mole CLI）。
