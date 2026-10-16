@@ -46,10 +46,19 @@ const CATEGORIES: CategoryDef[] = [
   },
 ];
 
+// 模块级缓存：离开页面再切换回来时秒开，不再每次都重新全量扫描几百个目录
+let cachedPreview: CleanupPreview | null = null;
+let cachedSelectedPaths: Set<string> | null = null;
+let cachedExpandedCategories: Set<string> | null = null;
+
 export default function CleanPage() {
-  const [preview, setPreview] = useState<CleanupPreview | null>(null);
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
+  const [preview, setPreview] = useState<CleanupPreview | null>(() => cachedPreview);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(
+    () => cachedSelectedPaths ?? new Set(),
+  );
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
+    () => cachedExpandedCategories ?? new Set(),
+  );
   const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [running, setRunning] = useState(false);
@@ -73,11 +82,30 @@ export default function CleanPage() {
     return item.tier === "regenerable" && !item.protection_reason && item.protection !== "system" && item.protection !== "whitelisted";
   }, []);
 
-  const load = useCallback(async () => {
+  // 同步用户在界面的选择状态至缓存，切 Tab 恢复
+  useEffect(() => {
+    cachedSelectedPaths = selectedPaths;
+  }, [selectedPaths]);
+
+  useEffect(() => {
+    cachedExpandedCategories = expandedCategories;
+  }, [expandedCategories]);
+
+  const load = useCallback(async (force = false) => {
+    // 若已有缓存且非强制刷新，直接使用已有的扫描结果
+    if (!force && cachedPreview) {
+      setPreview(cachedPreview);
+      if (cachedSelectedPaths) {
+        setSelectedPaths(cachedSelectedPaths);
+      }
+      return;
+    }
+
     setScanning(true);
     setResult(null);
     try {
-      const data = await cleanupPreview();
+      const data = await cleanupPreview(force);
+      cachedPreview = data;
       setPreview(data);
       setError(null);
 
@@ -88,6 +116,7 @@ export default function CleanPage() {
           recommendedSet.add(item.path);
         }
       }
+      cachedSelectedPaths = recommendedSet;
       setSelectedPaths(recommendedSet);
     } catch (e) {
       setError(String(e));
@@ -96,9 +125,11 @@ export default function CleanPage() {
     }
   }, [isItemCleanable]);
 
-  // 组件加载时自动开始扫描
+  // 组件挂载时：若无缓存才触发扫描，有缓存则秒开
   useEffect(() => {
-    load();
+    if (!cachedPreview) {
+      load(false);
+    }
   }, [load]);
 
   // 按分类对缓存项目归组
@@ -254,8 +285,10 @@ export default function CleanPage() {
       const pathsToClean = Array.from(selectedPaths);
       const res = await runClean(false, pathsToClean);
       setResult(res);
-      // 清理完毕后刷新扫描结果
-      await load();
+      // 清理完毕后清空缓存并强制重扫最新状态
+      cachedPreview = null;
+      cachedSelectedPaths = null;
+      await load(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -318,7 +351,7 @@ export default function CleanPage() {
           <button
             className="clean-icon-btn"
             title={t("clean.rescan")}
-            onClick={load}
+            onClick={() => load(true)}
             disabled={scanning || running}
           >
             <RefreshIcon spinning={scanning} />

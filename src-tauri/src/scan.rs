@@ -410,11 +410,12 @@ pub fn classify_category(name: &str, path: &str) -> (&'static str, bool, Option<
         } else {
             "开发与编译构建缓存"
         };
+        let is_download_cache = lower_name == "homebrew" || lower_name.contains("brew");
         return (
             "developer",
-            true,
+            is_download_cache,
             Some(display.to_string()),
-            Some("Xcode、SwiftPM、Node.js 等工具的缓存，清理后首次构建会稍慢".to_string()),
+            Some("Xcode、SwiftPM、Node.js 等工具的缓存，清理后首次构建会稍慢，建议按需勾选".to_string()),
         );
     }
 
