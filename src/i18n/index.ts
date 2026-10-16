@@ -1,6 +1,7 @@
 /** 轻量 i18n：检测系统语言，提供 t() 与语言切换。 */
 import { useSyncExternalStore } from "react";
 import { messages, type Locale, type MessageKey } from "./messages";
+export type { Locale, MessageKey };
 
 const STORE_KEY = "talpa.locale";
 

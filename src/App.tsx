@@ -4,16 +4,18 @@ import { useT, toggleLocale, getLocale } from "./i18n";
 import type { CliLocation } from "./types";
 import StatusPage from "./pages/StatusPage";
 import CleanPage from "./pages/CleanPage";
+import OptimizePage from "./pages/OptimizePage";
 import UninstallPage from "./pages/UninstallPage";
 import StartupPage from "./pages/StartupPage";
 import AnalyzePage from "./pages/AnalyzePage";
 import HistoryPage from "./pages/HistoryPage";
 
-type Tab = "status" | "clean" | "uninstall" | "startup" | "analyze" | "history";
+type Tab = "status" | "clean" | "optimize" | "uninstall" | "startup" | "analyze" | "history";
 
-const TABS: { id: Tab; icon: string; key: "nav.status" | "nav.clean" | "nav.uninstall" | "nav.startup" | "nav.analyze" | "nav.history" }[] = [
+const TABS: { id: Tab; icon: string; key: "nav.status" | "nav.clean" | "nav.optimize" | "nav.uninstall" | "nav.startup" | "nav.analyze" | "nav.history" }[] = [
   { id: "status", icon: "◉", key: "nav.status" },
   { id: "clean", icon: "✦", key: "nav.clean" },
+  { id: "optimize", icon: "⚡", key: "nav.optimize" },
   { id: "uninstall", icon: "◎", key: "nav.uninstall" },
   { id: "startup", icon: "⏻", key: "nav.startup" },
   { id: "analyze", icon: "▤", key: "nav.analyze" },
@@ -75,6 +77,7 @@ export default function App() {
       <main className="content">
         {tab === "status" && <StatusPage />}
         {tab === "clean" && <CleanPage />}
+        {tab === "optimize" && <OptimizePage />}
         {tab === "uninstall" && <UninstallPage />}
         {tab === "startup" && <StartupPage />}
         {tab === "analyze" && <AnalyzePage />}

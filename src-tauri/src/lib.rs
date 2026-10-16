@@ -8,6 +8,7 @@ pub mod clean;
 pub mod cli;
 pub mod commands;
 pub mod history;
+pub mod optimize;
 pub mod safety;
 pub mod scan;
 pub mod smc;
@@ -34,6 +35,8 @@ pub fn run() {
             commands::run_clean,
             commands::run_uninstall,
             commands::run_optimize,
+            commands::list_optimize_tasks,
+            commands::run_optimize_tasks,
             commands::read_whitelist,
             commands::home_dir,
             commands::startup_items,

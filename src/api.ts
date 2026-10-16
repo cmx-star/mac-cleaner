@@ -15,14 +15,16 @@ import type {
   ScanResult,
   Snapshot,
   StartupItem,
+  OptimizeTaskDef,
+  OptimizeTaskResult,
 } from "./types";
 
 export function scanDirectory(path: string): Promise<ScanResult> {
   return invoke("scan_directory", { path });
 }
 
-export function cleanupPreview(): Promise<CleanupPreview> {
-  return invoke("cleanup_preview");
+export function cleanupPreview(force?: boolean): Promise<CleanupPreview> {
+  return invoke("cleanup_preview", { force: force ?? false });
 }
 
 export function systemStatus(): Promise<Snapshot> {
@@ -75,6 +77,14 @@ export function runUninstall(appName: string, dryRun: boolean): Promise<CommandO
 
 export function runOptimize(dryRun: boolean): Promise<CommandOutput> {
   return invoke("run_optimize", { dryRun });
+}
+
+export function listOptimizeTasks(): Promise<OptimizeTaskDef[]> {
+  return invoke("list_optimize_tasks");
+}
+
+export function runOptimizeTasks(taskIds: string[]): Promise<OptimizeTaskResult[]> {
+  return invoke("run_optimize_tasks", { taskIds });
 }
 
 export function classifyPath(path: string): Promise<{ protection: Protection; reason: string | null }> {

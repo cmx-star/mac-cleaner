@@ -41,12 +41,39 @@ pub async fn extension_breakdown(path: String) -> Result<std::collections::HashM
         .map_err(|e| format!("统计任务异常：{e}"))?
 }
 
-/// 扫描清理候选。
+static CLEANUP_CACHE: std::sync::Mutex<Option<(std::time::Instant, scan::CleanupPreview)>> =
+    std::sync::Mutex::new(None);
+
+pub fn invalidate_cleanup_cache() {
+    if let Ok(mut guard) = CLEANUP_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// 扫描清理候选。支持可选的强制刷新与内存缓存，避免重复进入页面时耗时重扫。
 #[tauri::command]
-pub async fn cleanup_preview() -> Result<scan::CleanupPreview, String> {
-    tauri::async_runtime::spawn_blocking(scan::scan_cleanup_candidates)
+pub async fn cleanup_preview(force: Option<bool>) -> Result<scan::CleanupPreview, String> {
+    let force = force.unwrap_or(false);
+    if !force {
+        if let Ok(guard) = CLEANUP_CACHE.lock() {
+            if let Some((instant, ref preview)) = *guard {
+                // 缓存 10 分钟有效
+                if instant.elapsed() < std::time::Duration::from_secs(600) {
+                    return Ok(preview.clone());
+                }
+            }
+        }
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(scan::scan_cleanup_candidates)
         .await
-        .map_err(|e| format!("扫描任务异常：{e}"))?
+        .map_err(|e| format!("扫描任务异常：{e}"))??;
+
+    if let Ok(mut guard) = CLEANUP_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), result.clone()));
+    }
+
+    Ok(result)
 }
 
 /// 采集系统状态。
@@ -160,6 +187,9 @@ pub async fn cli_status() -> Result<cli::CliLocation, String> {
 /// 执行清理（纯 Rust 原生实现，不依赖外部 CLI）。
 #[tauri::command]
 pub async fn run_clean(paths: Option<Vec<String>>, dry_run: bool) -> Result<cli::CommandOutput, String> {
+    if !dry_run {
+        invalidate_cleanup_cache();
+    }
     clean::clean_system(paths, dry_run).await
 }
 
@@ -176,6 +206,18 @@ pub async fn run_uninstall(
 #[tauri::command]
 pub async fn run_optimize(dry_run: bool) -> Result<cli::CommandOutput, String> {
     clean::optimize_system(dry_run).await
+}
+
+/// 获取全部支持的系统优化与维护任务定义
+#[tauri::command]
+pub fn list_optimize_tasks() -> Vec<crate::optimize::OptimizeTaskDef> {
+    crate::optimize::list_optimize_tasks()
+}
+
+/// 批量执行指定的系统维护任务
+#[tauri::command]
+pub async fn run_optimize_tasks(task_ids: Vec<String>) -> Result<Vec<crate::optimize::OptimizeTaskResult>, String> {
+    crate::optimize::run_optimize_tasks(task_ids).await
 }
 
 /// 读取用户保护名单。

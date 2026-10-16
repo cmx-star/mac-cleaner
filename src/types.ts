@@ -300,3 +300,18 @@ export interface CommandOutput {
   stdout: string;
   stderr: string;
 }
+
+export interface OptimizeTaskDef {
+  id: string;
+  name_key: string;
+  desc_key: string;
+  icon_name: string;
+  recommended: boolean;
+}
+
+export interface OptimizeTaskResult {
+  id: string;
+  success: boolean;
+  message: string;
+}
+
