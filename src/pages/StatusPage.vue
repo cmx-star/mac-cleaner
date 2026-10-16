@@ -5,6 +5,15 @@
   <div v-else class="page">
     <div class="title-row">
       <div class="page-title">{{ t("status.title") }}</div>
+      <button
+        class="icon-button"
+        :disabled="refreshing"
+        :title="t('common.refresh')"
+        :aria-label="t('common.refresh')"
+        @click="refresh"
+      >
+        <RefreshIcon :spinning="refreshing" />
+      </button>
     </div>
     <div class="page-subtitle">
       {{ snap.host }} · {{ snap.hardware.cpu_model }} · {{ snap.hardware.total_ram }} · {{ snap.os_version }}
@@ -626,11 +635,6 @@
       </table>
     </div>
 
-    <div style="display: flex; justify-content: flex-end">
-      <button class="button secondary" :disabled="refreshing" @click="refresh">
-        {{ refreshing ? t("common.refreshing") : t("common.refresh") }}
-      </button>
-    </div>
 
     <!-- 为什么在运行？详情弹窗 -->
     <ProcessDetailModal
@@ -669,6 +673,7 @@ import {
   DiskIcon,
   NetworkIcon,
   FanIcon,
+  RefreshIcon,
 } from "../components/Icons";
 import CoreBars from "./status/CoreBars.vue";
 import Gauge from "./status/Gauge.vue";

@@ -2,7 +2,17 @@
   <div v-if="error" class="error-box">{{ error }}</div>
   <Spinner v-else-if="!history" :label="t('common.loading')" />
   <div v-else class="page history-page">
-    <div class="page-title">{{ t("history.title") }}</div>
+    <div class="title-row">
+      <div class="page-title">{{ t("history.title") }}</div>
+      <button
+        class="icon-button"
+        :title="t('common.refresh')"
+        :aria-label="t('common.refresh')"
+        @click="load"
+      >
+        <RefreshIcon />
+      </button>
+    </div>
     <div class="page-subtitle">{{ t("history.subtitle") }}</div>
 
     <div v-if="!hasContent" class="empty" style="flex: 1; display: flex; align-items: center; justify-content: center">
@@ -46,14 +56,11 @@
       </div>
     </div>
 
-    <!-- 底部固定栏：日志路径在左，刷新按钮在右 -->
+    <!-- 底部固定栏：日志路径 -->
     <div class="history-footer">
       <div class="history-log-path">
         {{ t("history.logAt", { path: history.operations_log }) }}
       </div>
-      <button class="button secondary" @click="load">
-        {{ t("common.refresh") }}
-      </button>
     </div>
   </div>
 </template>
@@ -63,6 +70,7 @@ import { computed, onMounted, ref } from "vue";
 import { readHistory } from "../api";
 import { useT } from "../i18n";
 import { Spinner } from "../components/Loading";
+import { RefreshIcon } from "../components/Icons";
 import type { History } from "../types";
 
 const t = useT();
