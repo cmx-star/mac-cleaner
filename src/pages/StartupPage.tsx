@@ -43,8 +43,7 @@ export default function StartupPage() {
     }
   }, []);
 
-  // 只在首次进入时拉一次。`sfltool dumpbtm` 在 BTM 数据库待重建时会请求
-  // 管理员权限，effect 被重复执行会导致连续弹授权框，这里加守卫挡住。
+  // 首次进入时拉取一次。采用零权限只读扫描，无管理员弹窗。
   const loadedOnce = useRef(false);
   useEffect(() => {
     if (loadedOnce.current) return;
