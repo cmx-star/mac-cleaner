@@ -635,6 +635,8 @@
       </table>
     </div>
 
+    <!-- 底部实体安全留白 -->
+    <div class="bottom-spacer" />
 
     <!-- 为什么在运行？详情弹窗 -->
     <ProcessDetailModal

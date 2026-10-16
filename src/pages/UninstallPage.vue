@@ -188,6 +188,9 @@
       </template>
     </div>
 
+    <!-- 底部实体安全留白 -->
+    <div :class="['bottom-spacer', selected ? 'with-action-bar' : '']" />
+
     <!-- 悬浮在窗口底部：选中应用后立刻可见 -->
     <div v-if="selected" class="action-bar">
       <div class="action-bar-inner">

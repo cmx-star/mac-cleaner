@@ -241,6 +241,9 @@
       </div>
     </div>
 
+    <!-- 底部实体安全留白（避开悬浮控制栏） -->
+    <div class="bottom-spacer with-sticky-footer" />
+
     <!-- 底部悬浮控制栏 -->
     <div class="clean-sticky-footer">
       <div class="clean-footer-left">

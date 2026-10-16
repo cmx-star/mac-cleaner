@@ -91,6 +91,9 @@
         </div>
       </div>
     </template>
+
+    <!-- 底部实体安全留白 -->
+    <div class="bottom-spacer" />
   </div>
 </template>
 

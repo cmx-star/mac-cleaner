@@ -171,6 +171,9 @@
       </template>
     </div>
 
+    <!-- 底部实体安全留白（避开悬浮清理条） -->
+    <div class="bottom-spacer with-sticky-footer" />
+
     <!-- 底部悬浮/固定操作条 -->
     <div class="clean-sticky-footer">
       <div class="clean-footer-left">
