@@ -1,6 +1,6 @@
 # Mole 桌面版
 
-基于 [Mole CLI](https://github.com/tw93/mole) 的 Mac 清理与维护界面。Tauri 2 + React + Rust。
+基于 [Mole CLI](https://github.com/tw93/mole) 的 Mac 清理与维护界面。Tauri 2 + Vue 3 + Rust。
 
 ## 设计原则
 
@@ -57,7 +57,7 @@ GitHub Actions 将自动执行以下流程：
 ## 结构
 
 ```
-src/                  React 前端
+src/                  Vue 3 前端
 src/types.ts          与 Rust 结构对应的类型
 src-tauri/src/
   safety.rs           路径保护判断（复刻 Mole 的只读规则）

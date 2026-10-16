@@ -1,11 +1,11 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import vue from "@vitejs/plugin-vue";
 
 // Tauri 在开发时通过固定端口加载前端，端口被占用时直接失败而不是静默改端口。
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [vue()],
   clearScreen: false,
   server: {
     port: 1420,

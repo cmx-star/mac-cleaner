@@ -1,5 +1,5 @@
 /** 轻量 i18n：检测系统语言，提供 t() 与语言切换。 */
-import { useSyncExternalStore } from "react";
+import { ref } from "vue";
 import { messages, type Locale, type MessageKey } from "./messages";
 export type { Locale, MessageKey };
 
@@ -20,40 +20,29 @@ function detectLocale(): Locale {
   return "zh-CN";
 }
 
-let current: Locale = detectLocale();
-const listeners = new Set<() => void>();
+export const currentLocale = ref<Locale>(detectLocale());
 
 export function getLocale(): Locale {
-  return current;
+  return currentLocale.value;
 }
 
 export function setLocale(locale: Locale) {
-  current = locale;
+  currentLocale.value = locale;
   try {
     localStorage.setItem(STORE_KEY, locale);
   } catch {
     // 忽略持久化失败。
   }
-  listeners.forEach((fn) => fn());
 }
 
 export function toggleLocale() {
-  setLocale(current === "zh-CN" ? "en" : "zh-CN");
+  setLocale(currentLocale.value === "zh-CN" ? "en" : "zh-CN");
 }
 
-function subscribe(fn: () => void) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-
-/** React 绑定：语言变化时触发重渲染。 */
-export function useLocale(): Locale {
-  return useSyncExternalStore(subscribe, getLocale);
-}
-
-/** 取文案并做 {name} 插值。非 React 场景也可用。 */
+/** 取文案并做 {name} 插值。非组件环境也可直接用。 */
 export function translate(key: MessageKey, params?: Record<string, string | number>): string {
-  const table = messages[current] as Record<string, string>;
+  const lang = currentLocale.value;
+  const table = messages[lang] as Record<string, string>;
   let text = table[key] ?? (messages["zh-CN"] as Record<string, string>)[key] ?? key;
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -63,8 +52,7 @@ export function translate(key: MessageKey, params?: Record<string, string | numb
   return text;
 }
 
-/** 组件内 hook：语言切换时自动重渲染。 */
+/** Vue 3 composition hook / helper：语言切换时模板自动响应。 */
 export function useT() {
-  useLocale();
   return translate;
 }
