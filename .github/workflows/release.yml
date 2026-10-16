@@ -45,6 +45,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build frontend
+        run: pnpm build
+
       - name: Build Universal fanctl helper binary
         run: |
           cargo build --manifest-path src-tauri/Cargo.toml --release --target aarch64-apple-darwin --bin fanctl
