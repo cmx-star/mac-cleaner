@@ -256,8 +256,14 @@ export interface History {
   limit: number;
 }
 
-/** 启动项分类，对应界面上的三个分组。 */
-export type StartupItemKind = "login_item" | "background" | "service";
+/** 启动项分类，精准对齐 Birth 与 Mole 的分类标准。 */
+export type StartupItemKind =
+  | "login_item"
+  | "user_agent"
+  | "global_agent"
+  | "daemon"
+  | "background"
+  | "service";
 
 export interface StartupItem {
   id: string;
@@ -275,6 +281,10 @@ export interface StartupItem {
   bundle_path: string | null;
   /** 图标（PNG base64）。 */
   icon_png_base64: string | null;
+  /** 副标题或徽标类型，如 App / 用户后台服务 / 全局后台服务 / 系统后台服务 */
+  sub_text?: string | null;
+  /** 包含的子助手数量 */
+  helper_count?: number;
 }
 
 export interface CliLocation {

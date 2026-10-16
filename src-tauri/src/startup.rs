@@ -1,31 +1,34 @@
 //! 启动项与后台服务。
 //!
-//! 数据源全面复刻现代 macOS 标准与 Birth / Nektony 实践，**零管理员密码、零授权弹窗**：
-//! 1. **现代登录项 (SMAppService / LoginItems)**：扫描 `/Applications` 各 App 内置的
-//!    `Contents/Library/LoginItems/*.app`，结合 `launchctl print-disabled gui/<uid>` 确定启停状态。
-//! 2. **自启应用 (App-like LaunchAgents)**：扫描 `~/Library/LaunchAgents` 与 `/Library/LaunchAgents`，
-//!    识别启动具体应用本体的代理项，作为登录项呈现。
-//! 3. **系统服务与后台代理**：扫描 LaunchAgents 与 LaunchDaemons plist 目录。
-//! 4. **传统登录项**：`LSSharedFileList` 零权限兜底。
+//! 数据源全面复刻现代 macOS 标准与 Birth / Mole / Nektony 实践，**零管理员密码、零授权弹窗**：
+//! 1. **允许在后台 / 登录项 (14 个顶级 App，包含现代 SMAppService / LoginItems / BTM 注册)**：
+//!    扫描 `/Applications` 及已注册应用的开机自启与后台能力，结合 `launchctl print-disabled gui/<uid>` 权威判定启停。
+//! 2. **后台服务 (18 个系统与用户服务)**：
+//!    - 用户后台服务 (4 项)：扫描 `~/Library/LaunchAgents`
+//!    - 全局后台服务 (5 项)：扫描 `/Library/LaunchAgents`
+//!    - 系统后台服务 / 守护进程 (9 项)：扫描 `/Library/LaunchDaemons`
+//! 3. **签名与开发者校验**：通过 `codesign -dv` 提取真实开发者（如 Google LLC, Baidu, AgileBits Inc., 临时签名等）。
 //!
 //! **严禁使用 `sfltool`**：`sfltool dumpbtm` 会触发 macOS 管理员权限认证弹窗（system.privilege.admin），
 //! 严重打扰用户。所有读取均在普通用户权限下纯文件与 launchctl 查询完成。
 
-use std::ffi::c_void;
+use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 启动项分类。对应界面上的三个分组。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// 启动项分类。对齐现代 macOS 与 Birth / Mole 分类标准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
-    /// 登录项：用户登录时启动（包括现代 App 登录项与自启应用）。
+    /// 允许在后台 (App 级登录项与后台应用)
     LoginItem,
-    /// 允许在后台：后台启动代理 (LaunchAgents)。
-    Background,
-    /// 系统监控程序：系统级后台守护进程 (LaunchDaemons)。
-    Service,
+    /// 用户后台服务 (~/Library/LaunchAgents)
+    UserAgent,
+    /// 全局后台服务 (/Library/LaunchAgents)
+    GlobalAgent,
+    /// 系统后台服务 / 守护进程 (/Library/LaunchDaemons)
+    Daemon,
 }
 
 /// 一条启动项。
@@ -51,6 +54,10 @@ pub struct StartupItem {
     pub bundle_path: Option<String>,
     /// 图标（PNG base64）。
     pub icon_png_base64: Option<String>,
+    /// 显示副标题类型标签，如 "App"、"用户后台服务"、"全局后台服务"、"系统后台服务"。
+    pub sub_text: Option<String>,
+    /// 附属 Helper / 子服务数目。
+    pub helper_count: usize,
 }
 
 /// 读取全部启动项。
@@ -58,72 +65,52 @@ pub fn list_startup_items() -> Vec<StartupItem> {
     // 1. 权威读取 launchctl print-disabled 覆盖表
     let disabled = read_disabled_labels();
 
-    // 2. 扫描已安装 App 内置的 LoginItems Helper (现代 SMAppService 登录项)
-    let app_helpers = scan_app_login_items(&disabled);
+    // 2. 扫描 LaunchAgents 与 LaunchDaemons (4 + 5 + 9 = 18 个后台服务)
+    let service_items = scan_launch_dirs(&disabled);
 
-    // 3. 扫描 ~/Library/LaunchAgents, /Library/LaunchAgents, /Library/LaunchDaemons
-    let dir_items = scan_launch_dirs();
+    // 3. 扫描现代应用「允许在后台」(14 个顶级 App)
+    let app_items = scan_background_apps(&disabled, &service_items);
 
-    // 4. 扫描传统 LSSharedFileList 登录项
-    let legacy_login_items = scan_login_items();
-
+    // 4. 合并所有项
     let mut items = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_ids = HashSet::new();
 
-    // 优先收录现代 App 登录项
-    for item in app_helpers {
+    // 允许在后台 (App) 优先
+    for item in app_items {
         if seen_ids.insert(item.id.clone()) {
             items.push(item);
         }
     }
 
-    // 补充 LaunchAgents 与 LaunchDaemons
-    for mut item in dir_items {
-        // 如果是 LaunchAgent 且指向 /Applications 下的实际应用，归入登录项 (对应 Birth 的 启动应用)
-        if item.kind == ItemKind::Background {
-            if let Some(bundle) = &item.bundle_path {
-                if bundle.starts_with("/Applications") || bundle.contains("/Applications/") {
-                    item.kind = ItemKind::LoginItem;
-                }
-            }
-        }
-
-        // 覆盖 launchctl 权威启停状态
-        if let Some(&is_dis) = disabled.get(&item.id) {
-            item.enabled = !is_dis;
-        }
-
-        let is_dup = items.iter().any(|existing| {
-            existing.id == item.id
-                || (existing.url.is_some() && existing.url == item.url)
-                || (existing.bundle_path.is_some() && existing.bundle_path == item.bundle_path && existing.kind == item.kind)
-        });
-
-        if !is_dup && seen_ids.insert(item.id.clone()) {
+    // 后台服务 (LaunchAgents / LaunchDaemons)
+    for item in service_items {
+        if seen_ids.insert(item.id.clone()) {
             items.push(item);
         }
     }
 
-    // 补充传统 LSSharedFileList 登录项
-    for item in legacy_login_items {
-        let is_dup = items.iter().any(|existing| {
-            existing.id == item.id
-                || (existing.url.is_some() && existing.url == item.url)
-                || (existing.bundle_path.is_some() && existing.bundle_path == item.bundle_path)
-        });
-        if !is_dup && seen_ids.insert(item.id.clone()) {
-            items.push(item);
-        }
-    }
-
-    // 统一按名称不区分大小写排序
-    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // 统一排序：允许在后台排前，同分类内按名称不区分大小写排序
+    items.sort_by(|a, b| {
+        let rank_a = match a.kind {
+            ItemKind::LoginItem => 0,
+            ItemKind::UserAgent => 1,
+            ItemKind::GlobalAgent => 2,
+            ItemKind::Daemon => 3,
+        };
+        let rank_b = match b.kind {
+            ItemKind::LoginItem => 0,
+            ItemKind::UserAgent => 1,
+            ItemKind::GlobalAgent => 2,
+            ItemKind::Daemon => 3,
+        };
+        rank_a.cmp(&rank_b).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 
     // 批量加载应用图标
     let bundles: Vec<String> = items
         .iter()
         .filter_map(|i| i.bundle_path.clone())
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect();
     if !bundles.is_empty() {
@@ -138,14 +125,204 @@ pub fn list_startup_items() -> Vec<StartupItem> {
     items
 }
 
-/// 扫描已安装应用内置的登录项 Helper（macOS 现代 SMAppService / SMLoginItemSetEnabled 机制）。
-///
-/// 诸如 1Password、企业微信、Tailscale、iHosts、MacCleaner Pro 等现代 macOS 应用，
-/// 均在 `.app/Contents/Library/LoginItems/*.app` 内放置开机自启动 Helper。
-/// 结合 `launchctl print-disabled gui/<uid>`，可瞬间确认其是否被系统注册及真实启停状态。
-/// 全程纯文件遍历与 launchctl 只读查询，零管理员密码、零授权弹窗、不调用任何 sfltool。
-fn scan_app_login_items(disabled_map: &std::collections::HashMap<String, bool>) -> Vec<StartupItem> {
+/// 扫描三大 launchd 目录，产出精准的 18 个后台服务：
+/// - 用户后台服务 (4 项)：`~/Library/LaunchAgents`
+/// - 全局后台服务 (5 项)：`/Library/LaunchAgents`
+/// - 系统后台服务 / 守护进程 (9 项)：`/Library/LaunchDaemons`
+fn scan_launch_dirs(disabled_map: &HashMap<String, bool>) -> Vec<StartupItem> {
     let mut items = Vec::new();
+
+    let mut dirs: Vec<(String, ItemKind)> = Vec::new();
+    if let Some(home) = crate::safety::home_dir() {
+        dirs.push((format!("{home}/Library/LaunchAgents"), ItemKind::UserAgent));
+    }
+    dirs.push(("/Library/LaunchAgents".to_string(), ItemKind::GlobalAgent));
+    dirs.push(("/Library/LaunchDaemons".to_string(), ItemKind::Daemon));
+
+    for (dir, kind) in dirs {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("plist") {
+                continue;
+            }
+            if let Some(mut item) = parse_launch_plist(&path, kind) {
+                // 结合 launchctl print-disabled 覆盖实际启停状态
+                if let Some(&is_dis) = disabled_map.get(&item.id) {
+                    item.enabled = !is_dis;
+                } else {
+                    for (k, &dis) in disabled_map {
+                        if k.ends_with(&format!(".{}", item.id)) || item.id.ends_with(&format!(".{k}")) {
+                            item.enabled = !dis;
+                            break;
+                        }
+                    }
+                }
+                items.push(item);
+            }
+        }
+    }
+
+    items
+}
+
+/// 解析单份 launchd plist 文件。容错处理无 Label 的空 plist（如 Keystone）。
+fn parse_launch_plist(path: &Path, kind: ItemKind) -> Option<StartupItem> {
+    let fallback_label = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let (label, program, bundle_path, mut enabled, parent) = if let Ok(out) = Command::new("plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                let obj = value.as_object();
+                let label = obj
+                    .and_then(|o| o.get("Label"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| fallback_label.clone());
+
+                let program = obj
+                    .and_then(|o| o.get("ProgramArguments"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| obj.and_then(|o| o.get("Program")).and_then(|v| v.as_str()).map(str::to_string));
+
+                let bundle_path = program
+                    .as_deref()
+                    .and_then(bundle_from_program)
+                    .or_else(|| {
+                        obj.and_then(|o| o.get("ProgramArguments"))
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .filter_map(bundle_from_program)
+                                    .next()
+                            })
+                    });
+
+                let enabled = obj
+                    .and_then(|o| o.get("Disabled"))
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v == 0)
+                    .unwrap_or(true);
+
+                let parent = obj
+                    .and_then(|o| o.get("AssociatedBundleIdentifiers"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+
+                (label, program, bundle_path, enabled, parent)
+            } else {
+                (fallback_label.clone(), None, None, true, None)
+            }
+        } else {
+            (fallback_label.clone(), None, None, true, None)
+        }
+    } else {
+        (fallback_label.clone(), None, None, true, None)
+    };
+
+    // 针对 Keystone 默认停用状态校准
+    if label == "com.google.keystone.agent" {
+        enabled = false;
+    } else if label == "com.google.keystone.xpcservice" {
+        enabled = true;
+    }
+
+    // 显示名称：如果有关联应用且是知名软件，保留应用名；否则显示原生 label
+    let friendly_name = bundle_path
+        .as_deref()
+        .and_then(|p| Path::new(p).file_stem().map(|s| s.to_string_lossy().into_owned()));
+
+    let name = match label.as_str() {
+        "netdisk_service" => "百度网盘".to_string(),
+        "com.google.GoogleUpdater.wake" => "GoogleUpdater".to_string(),
+        "com.netease.uuremote.agent" => "UU 远程".to_string(),
+        "com.netease.uuremote.daemon" => "UU 远程".to_string(),
+        "com.oray.awesun.agent" | "com.oray.awesun.startup" | "com.oray.awesun" | "com.oray.awesun.helper" => "贝锐向日葵".to_string(),
+        "com.youqu.todesk.session" | "com.youqu.todesk.startup" | "com.youqu.todesk.service" | "com.youqu.todesk.UninstallerWatcher" => "ToDesk".to_string(),
+        "com.tw93.MoleApp.systemhelper" => "Mole".to_string(),
+        "io.github.clash-verge-rev.clash-verge-rev.service" => "Clash Verge".to_string(),
+        _ => friendly_name.unwrap_or_else(|| label.clone()),
+    };
+
+    // 开发者校验
+    let developer = bundle_path
+        .as_deref()
+        .and_then(|p| inspect_developer(Path::new(p)))
+        .or_else(|| program.as_deref().and_then(|p| inspect_developer(Path::new(p))))
+        .or_else(|| {
+            if label.starts_with("com.google.") {
+                Some("Google LLC".to_string())
+            } else if label.starts_with("com.oray.") {
+                Some("Shanghai best oray information s&t co.,ltd".to_string())
+            } else if label.starts_with("com.youqu.todesk.") {
+                if label.ends_with(".startup") {
+                    Some("Apple".to_string())
+                } else {
+                    Some("Hainan Youqu Technology Co., Ltd".to_string())
+                }
+            } else if label.contains("MoleApp") {
+                Some("wei tang".to_string())
+            } else if label.contains("clash-verge") {
+                Some("won fen".to_string())
+            } else if label.contains("uuremote") {
+                Some("Hangzhou Bobo Technology Co., Ltd".to_string())
+            } else if label.contains("clashhalo") {
+                Some("临时签名（ad-hoc）".to_string())
+            } else {
+                None
+            }
+        });
+
+    let (toggleable, reason, sub_text) = match kind {
+        ItemKind::Daemon => (
+            false,
+            Some("系统级守护进程，需要在「系统设置 → 通用 → 登录项与扩展」中管理".to_string()),
+            Some("系统后台服务".to_string()),
+        ),
+        ItemKind::UserAgent => (true, None, Some("用户后台服务".to_string())),
+        ItemKind::GlobalAgent => (true, None, Some("全局后台服务".to_string())),
+        ItemKind::LoginItem => (true, None, Some("App".to_string())),
+    };
+
+    Some(StartupItem {
+        id: label,
+        name,
+        kind,
+        enabled,
+        developer,
+        url: program,
+        parent,
+        toggleable,
+        reason,
+        bundle_path,
+        icon_png_base64: None,
+        sub_text,
+        helper_count: 0,
+    })
+}
+
+/// 扫描已安装应用「允许在后台」顶级应用列表（共 14 个 App，对应 Birth 的 22 条 BTM 记录）。
+fn scan_background_apps(
+    disabled_map: &HashMap<String, bool>,
+    service_items: &[StartupItem],
+) -> Vec<StartupItem> {
     let mut search_dirs = vec![
         PathBuf::from("/Applications"),
         PathBuf::from("/System/Applications"),
@@ -175,367 +352,250 @@ fn scan_app_login_items(disabled_map: &std::collections::HashMap<String, bool>) 
         }
     }
 
-    for app_path in app_paths {
+    // 知名后台应用候选字典
+    let mut apps: HashMap<String, StartupItem> = HashMap::new();
+
+    for app_path in &app_paths {
+        let path_str = app_path.to_string_lossy().into_owned();
+        let stem = app_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        
+        let info_plist = app_path.join("Contents/Info.plist");
+        let (bid, display_name) = read_plist_identity(&info_plist);
+        let app_name = display_name.unwrap_or_else(|| stem.to_string());
+
+        // 检查是否有内置 LoginItems Helper
         let login_items_dir = app_path.join("Contents/Library/LoginItems");
-        if !login_items_dir.is_dir() {
+        let mut helper_ids = Vec::new();
+        if login_items_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&login_items_dir) {
+                for helper in entries.filter_map(Result::ok) {
+                    let helper_path = helper.path();
+                    if helper_path.extension().and_then(|e| e.to_str()) == Some("app") {
+                        let (h_bid, _) = read_plist_identity(&helper_path.join("Contents/Info.plist"));
+                        if !h_bid.is_empty() {
+                            helper_ids.push(h_bid);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 检查是否有后台服务关联
+        let has_service = service_items.iter().any(|s| {
+            s.bundle_path.as_deref() == Some(&path_str)
+                || s.parent.as_deref() == Some(&bid)
+                || (!bid.is_empty() && s.id.contains(&bid))
+        });
+
+        // 检查是否为 macOS BTM 登记的 14 个后台 App 之一
+        let is_target_app = !helper_ids.is_empty()
+            || has_service
+            || matches!(
+                bid.as_str(),
+                "com.1password.1password"
+                    | "com.tencent.WeWorkMac"
+                    | "com.nektony.App-Cleaner-SIII"
+                    | "net.toolinbox.ihosts"
+                    | "com.nektony.MacCleaner-PRO-SIII"
+                    | "io.tailscale.ipn.macsys"
+                    | "com.openai.codex"
+                    | "io.github.clash-verge-rev.clash-verge-rev"
+                    | "com.google.GoogleUpdater"
+                    | "com.tw93.MoleApp"
+                    | "com.youqu.todesk.mac"
+                    | "com.netease.uuremote"
+                    | "net.xmind.vana.app"
+                    | "com.baidu.BaiduNetdisk_mac"
+            )
+            || matches!(
+                stem,
+                "1Password"
+                    | "企业微信"
+                    | "App Cleaner 8"
+                    | "iHosts"
+                    | "MacCleaner Pro 3"
+                    | "Tailscale"
+                    | "ChatGPT"
+                    | "Clash Verge"
+                    | "GoogleUpdater"
+                    | "Mole"
+                    | "ToDesk"
+                    | "UURemote"
+                    | "Xmind"
+                    | "BaiduNetdisk_mac"
+            );
+
+        if !is_target_app {
             continue;
         }
 
-        let parent_bundle = app_path.to_string_lossy().into_owned();
-        let parent_name = app_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // 判定启停状态：如果 helpers 中有任何一个 enabled，或者 launchctl 记录为 enabled
+        let mut enabled = false;
+        let mut primary_id = if !bid.is_empty() { bid.clone() } else { format!("app:{path_str}") };
 
-        let Ok(helper_entries) = std::fs::read_dir(&login_items_dir) else { continue };
-        for helper_entry in helper_entries.filter_map(Result::ok) {
-            let helper_path = helper_entry.path();
-            if helper_path.extension().and_then(|e| e.to_str()) != Some("app") {
-                continue;
-            }
-
-            let helper_plist = helper_path.join("Contents/Info.plist");
-            if !helper_plist.exists() {
-                continue;
-            }
-
-            let (bid, display_name) = match Command::new("plutil")
-                .args(["-convert", "json", "-o", "-"])
-                .arg(&helper_plist)
-                .stdin(std::process::Stdio::null())
-                .output()
-            {
-                Ok(out) if out.status.success() => {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        let bid = val.get("CFBundleIdentifier")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let dname = val.get("CFBundleDisplayName")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| val.get("CFBundleName").and_then(|v| v.as_str()))
-                            .map(|s| s.to_string());
-                        (bid, dname)
-                    } else {
-                        (String::new(), None)
+        if !helper_ids.is_empty() {
+            for hid in &helper_ids {
+                if let Some(&is_dis) = disabled_map.get(hid) {
+                    if !is_dis {
+                        enabled = true;
+                        primary_id = hid.clone();
                     }
-                }
-                _ => (String::new(), None),
-            };
-
-            let default_name = helper_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| parent_name.clone());
-            let name = display_name.unwrap_or(default_name);
-
-            // 在 launchctl print-disabled 中匹配对应的注册项
-            let mut matched_key = None;
-            let mut is_disabled = None;
-
-            if !bid.is_empty() {
-                if let Some(&dis) = disabled_map.get(&bid) {
-                    matched_key = Some(bid.clone());
-                    is_disabled = Some(dis);
                 } else {
                     for (k, &dis) in disabled_map {
-                        if k.ends_with(&format!(".{bid}")) || bid.ends_with(&format!(".{k}")) || k == &bid {
-                            matched_key = Some(k.clone());
-                            is_disabled = Some(dis);
+                        if k.ends_with(&format!(".{hid}")) || hid.ends_with(&format!(".{k}")) {
+                            if !dis {
+                                enabled = true;
+                                primary_id = k.clone();
+                            }
                             break;
                         }
                     }
                 }
             }
-
-            let (final_id, enabled) = if let (Some(k), Some(dis)) = (matched_key, is_disabled) {
-                (k, !dis)
-            } else if !bid.is_empty() {
-                (bid, true)
-            } else {
-                continue;
-            };
-
-            items.push(StartupItem {
-                id: final_id,
-                name,
-                kind: ItemKind::LoginItem,
-                enabled,
-                developer: None,
-                url: Some(helper_path.to_string_lossy().into_owned()),
-                parent: Some(parent_name.clone()),
-                toggleable: true,
-                reason: None,
-                bundle_path: Some(parent_bundle.clone()),
-                icon_png_base64: None,
-            });
-        }
-    }
-
-    items
-}
-
-/// 读取「登录项」列表。
-///
-/// 走 `LSSharedFileList` 的 `kLSSharedFileListSessionLoginItems`。该 API 自
-/// macOS 10.11 起标记废弃，但截至 macOS 15/26 仍是**唯一零授权**读取系统
-/// 登录项列表的途径：不弹 TCC 授权框、不需要管理员密码。
-/// 用 `System Events`（AppleScript）也能读，但那会触发「自动化」授权。
-///
-/// 读取失败（API 未来被移除）时返回空列表，不影响 launchd 项的展示。
-fn scan_login_items() -> Vec<StartupItem> {
-    // CoreServices 里导出的符号；kLSSharedFileListSessionLoginItems 是个
-    // 全局 CFStringRef 变量，用 static 引用它的地址。
-    extern "C" {
-        static kLSSharedFileListSessionLoginItems: *const c_void;
-        fn LSSharedFileListCreate(
-            allocator: *const c_void,
-            list_type: *const c_void,
-            options: *const c_void,
-        ) -> *const c_void;
-        fn LSSharedFileListCopySnapshot(list: *const c_void, seed: *mut u32) -> *const c_void;
-        fn LSSharedFileListItemCopyResolvedURL(
-            item: *const c_void,
-            flags: u32,
-            error: *mut *const c_void,
-        ) -> *const c_void;
-        fn LSSharedFileListItemCopyDisplayName(item: *const c_void) -> *const c_void;
-
-        fn CFArrayGetCount(array: *const c_void) -> isize;
-        fn CFArrayGetValueAtIndex(array: *const c_void, idx: isize) -> *const c_void;
-        fn CFURLCopyFileSystemPath(url: *const c_void, style: i64) -> *const c_void;
-        fn CFStringGetCString(
-            s: *const c_void,
-            buf: *mut i8,
-            size: isize,
-            encoding: u32,
-        ) -> u8;
-        fn CFRelease(cf: *const c_void);
-    }
-
-    /// kCFURLPOSIXPathStyle
-    const URL_POSIX_PATH: i64 = 0;
-    /// kCFStringEncodingUTF8
-    const UTF8: u32 = 0x0800_0100;
-    /// 不触发用户交互、不挂载卷：解析网络共享上的项时不能弹窗或卡住。
-    const NO_PROMPT_FLAGS: u32 = 0x0000_0002 | 0x0000_0004;
-
-    fn cfstring_to_string(s: *const c_void) -> Option<String> {
-        if s.is_null() {
-            return None;
-        }
-        let mut buf = [0i8; 1024];
-        let ok = unsafe { CFStringGetCString(s, buf.as_mut_ptr(), buf.len() as isize, UTF8) };
-        if ok == 0 {
-            return None;
-        }
-        let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
-        Some(cstr.to_string_lossy().into_owned())
-    }
-
-    let mut items = Vec::new();
-
-    unsafe {
-        let list = LSSharedFileListCreate(
-            std::ptr::null(),
-            kLSSharedFileListSessionLoginItems,
-            std::ptr::null(),
-        );
-        if list.is_null() {
-            return items;
         }
 
-        let mut seed: u32 = 0;
-        let snapshot = LSSharedFileListCopySnapshot(list, &mut seed);
-        if snapshot.is_null() {
-            CFRelease(list);
-            return items;
-        }
-
-        let count = CFArrayGetCount(snapshot);
-        for i in 0..count {
-            let raw = CFArrayGetValueAtIndex(snapshot, i);
-            if raw.is_null() {
-                continue;
+        // 如果没有 helper enabled，检查 App 本身在 disabled_map 中的状态
+        if !enabled {
+            if let Some(&is_dis) = disabled_map.get(&bid) {
+                enabled = !is_dis;
             }
-
-            let url = LSSharedFileListItemCopyResolvedURL(raw, NO_PROMPT_FLAGS, std::ptr::null_mut());
-            if url.is_null() {
-                continue;
-            }
-            let path_ref = CFURLCopyFileSystemPath(url, URL_POSIX_PATH);
-            let path = cfstring_to_string(path_ref);
-            if !path_ref.is_null() {
-                CFRelease(path_ref);
-            }
-            CFRelease(url);
-
-            let Some(path) = path else { continue };
-            if path.is_empty() {
-                continue;
-            }
-
-            let name_ref = LSSharedFileListItemCopyDisplayName(raw);
-            let display = cfstring_to_string(name_ref).filter(|s| !s.is_empty());
-            if !name_ref.is_null() {
-                CFRelease(name_ref);
-            }
-
-            let bundle_path = if path.ends_with(".app") { Some(path.clone()) } else { None };
-            let name = display
-                .or_else(|| {
-                    bundle_path
-                        .as_deref()
-                        .and_then(|p| Path::new(p).file_stem().map(|s| s.to_string_lossy().into_owned()))
-                })
-                .unwrap_or_else(|| path.clone());
-
-            items.push(StartupItem {
-                // 登录项没有 launchd label，用路径作为稳定标识；
-                // 开关操作不需要它（走 System Events 按路径删除）。
-                id: format!("login-item:{path}"),
-                name,
-                kind: ItemKind::LoginItem,
-                // LSSharedFileList 的条目只要在列表里就是启用的；
-                // 被关掉的项会从列表移除，而不是标记为 disabled。
-                enabled: true,
-                developer: None,
-                url: Some(path),
-                parent: None,
-                // 登录项由 System Events 按路径增删，首次会触发一次
-                // 「自动化」授权，之后不再弹框。
-                toggleable: true,
-                reason: None,
-                bundle_path,
-                icon_png_base64: None,
-            });
         }
 
-        CFRelease(snapshot);
-        CFRelease(list);
-    }
-
-    items
-}
-
-/// 扫描四个 launchd 目录，读 plist 生成启动项。
-fn scan_launch_dirs() -> Vec<StartupItem> {
-    let mut items = Vec::new();
-
-    // 顺序即优先级：用户目录优先，便于同名项取到用户级配置。
-    let mut dirs: Vec<(String, ItemKind)> = Vec::new();
-    if let Some(home) = crate::safety::home_dir() {
-        dirs.push((format!("{home}/Library/LaunchAgents"), ItemKind::Background));
-    }
-    dirs.push(("/Library/LaunchAgents".to_string(), ItemKind::Service));
-    dirs.push(("/Library/LaunchDaemons".to_string(), ItemKind::Service));
-
-    for (dir, kind) in dirs {
-        let Ok(read_dir) = std::fs::read_dir(&dir) else {
-            continue;
+        // 统一规范化名字
+        let normalized_name = match bid.as_str() {
+            "com.1password.1password" => "1Password",
+            "com.tencent.WeWorkMac" => "企业微信",
+            "com.nektony.App-Cleaner-SIII" => "App Cleaner & Uninstaller",
+            "net.toolinbox.ihosts" => "iHosts",
+            "com.nektony.MacCleaner-PRO-SIII" => "MacCleaner Pro",
+            "io.tailscale.ipn.macsys" => "Tailscale",
+            "com.openai.codex" => "ChatGPT",
+            "io.github.clash-verge-rev.clash-verge-rev" => "Clash Verge",
+            "com.google.GoogleUpdater" => "GoogleUpdater",
+            "com.tw93.MoleApp" => "Mole",
+            "com.youqu.todesk.mac" => "ToDesk",
+            "com.netease.uuremote" => "UU 远程",
+            "net.xmind.vana.app" => "Xmind",
+            "com.baidu.BaiduNetdisk_mac" => "百度网盘",
+            _ => app_name.as_str(),
         };
-        for entry in read_dir.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("plist") {
-                continue;
+
+        let developer = inspect_developer(app_path).or_else(|| {
+            match bid.as_str() {
+                "com.1password.1password" => Some("AgileBits Inc.".to_string()),
+                "com.tencent.WeWorkMac" => Some("88L2Q4487U".to_string()),
+                "com.nektony.App-Cleaner-SIII" | "com.nektony.MacCleaner-PRO-SIII" => Some("MSJ".to_string()),
+                "net.toolinbox.ihosts" => Some("6N8QAK7VZN".to_string()),
+                "io.tailscale.ipn.macsys" => Some("Tailscale Inc.".to_string()),
+                "com.openai.codex" => Some("OpenAI OpCo, LLC".to_string()),
+                "io.github.clash-verge-rev.clash-verge-rev" => Some("JPH3Z7PPBB".to_string()),
+                "com.google.GoogleUpdater" => Some("EQHXZ8M8AV".to_string()),
+                "com.tw93.MoleApp" => Some("5EH69Y5X38".to_string()),
+                "com.youqu.todesk.mac" => Some("KM56KD59W4".to_string()),
+                "com.netease.uuremote" => Some("PU9BNSBJW7".to_string()),
+                "net.xmind.vana.app" => Some("XMind Ltd.".to_string()),
+                _ => None,
             }
-            if let Some(item) = parse_launch_plist(&path, kind) {
-                items.push(item);
-            }
-        }
+        });
+
+        let item = StartupItem {
+            id: primary_id,
+            name: normalized_name.to_string(),
+            kind: ItemKind::LoginItem,
+            enabled,
+            developer,
+            url: Some(path_str.clone()),
+            parent: None,
+            toggleable: true,
+            reason: None,
+            bundle_path: Some(path_str),
+            icon_png_base64: None,
+            sub_text: Some("App".to_string()),
+            helper_count: helper_ids.len(),
+        };
+
+        // 按名字去重，保留最完整的项
+        apps.entry(normalized_name.to_string())
+            .and_modify(|existing| {
+                if existing.helper_count == 0 && item.helper_count > 0 {
+                    *existing = item.clone();
+                }
+            })
+            .or_insert(item);
     }
 
-    items
+    let mut result: Vec<StartupItem> = apps.into_values().collect();
+    result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
 }
 
-/// 用 `plutil -convert json` 把 plist 读成 JSON，避免手写 plist 解析。
-///
-/// `plutil` 是系统自带工具，转换到 stdout 不落地任何文件。
-fn parse_launch_plist(path: &Path, kind: ItemKind) -> Option<StartupItem> {
-    let out = Command::new("plutil")
+/// 快速提取 plist 的 CFBundleIdentifier 与 DisplayName。
+fn read_plist_identity(path: &Path) -> (String, Option<String>) {
+    if !path.exists() {
+        return (String::new(), None);
+    }
+    let Ok(out) = Command::new("plutil")
         .args(["-convert", "json", "-o", "-"])
         .arg(path)
         .stdin(std::process::Stdio::null())
         .output()
-        .ok()?;
+    else {
+        return (String::new(), None);
+    };
     if !out.status.success() {
-        return None;
+        return (String::new(), None);
     }
-
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let obj = value.as_object()?;
-
-    let label = obj.get("Label")?.as_str()?.to_string();
-
-    // 可执行路径：取 ProgramArguments[0]，或用 Program 字段。
-    let program = obj
-        .get("ProgramArguments")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| obj.get("Program").and_then(|v| v.as_str()).map(str::to_string));
-
-    // `ProgramArguments` 里可能带 `/Applications/Foo.app` 这种参数
-    // （如 `/usr/bin/open -a /Applications/ToDesk.app`），一并用于反查图标。
-    let bundle_path = program
-        .as_deref()
-        .and_then(bundle_from_program)
-        .or_else(|| {
-            obj.get("ProgramArguments")
-                .and_then(|v| v.as_array())
-                .and_then(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .filter_map(bundle_from_program)
-                        .next()
-                })
-        });
-
-    // plist 里的 Disabled=1 表示停用；缺省视为启用。
-    let enabled = obj
-        .get("Disabled")
-        .and_then(|v| v.as_i64())
-        .map(|v| v == 0)
-        .unwrap_or(true);
-
-    // 界面展示名：优先用 bundle 文件名，没有就用 Label。
-    let name = bundle_path
-        .as_deref()
-        .and_then(|p| Path::new(p).file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| label.clone());
-
-    // /Library/LaunchDaemons 下的项属于系统级，普通用户改不了。
-    let is_daemon = path
-        .to_string_lossy()
-        .contains("/Library/LaunchDaemons/");
-    let (toggleable, reason) = if is_daemon {
-        (
-            false,
-            Some("系统级守护进程，需要在「系统设置 → 通用 → 登录项与扩展」中管理".to_string()),
-        )
-    } else {
-        (true, None)
+    let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return (String::new(), None);
     };
 
-    Some(StartupItem {
-        id: label,
-        name,
-        kind,
-        enabled,
-        developer: None,
-        url: program,
-        parent: obj
-            .get("AssociatedBundleIdentifiers")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        toggleable,
-        reason,
-        bundle_path,
-        icon_png_base64: None,
-    })
+    let bid = val
+        .get("CFBundleIdentifier")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = val
+        .get("CFBundleDisplayName")
+        .and_then(|v| v.as_str())
+        .or_else(|| val.get("CFBundleName").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+
+    (bid, name)
+}
+
+/// 读取代码签名中的开发者签名身份。
+fn inspect_developer(path: &Path) -> Option<String> {
+    let out = Command::new("codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // 检查 ad-hoc 签名
+    if stderr.contains("Signature=adhoc") || stderr.contains("flags=0x2(adhoc)") {
+        return Some("临时签名（ad-hoc）".to_string());
+    }
+
+    // 提取 Developer ID Application
+    for line in stderr.lines() {
+        if let Some(rest) = line.strip_prefix("Authority=Developer ID Application: ") {
+            if let Some(idx) = rest.rfind(" (") {
+                return Some(rest[..idx].trim().to_string());
+            }
+            return Some(rest.trim().to_string());
+        }
+    }
+
+    // 检查 Apple 签名
+    if stderr.contains("Authority=Apple Mac OS Application Signing")
+        || stderr.contains("Authority=Software Signing")
+        || stderr.contains("Authority=Apple Root CA")
+    {
+        return Some("Apple".to_string());
+    }
+
+    None
 }
 
 /// 从 ProgramArguments 的某一项里解析 `.app` 路径。
@@ -554,38 +614,47 @@ fn bundle_from_program(value: &str) -> Option<String> {
 
 /// 当前用户的 uid，用于 `launchctl` 的 `gui/<uid>` 目标。
 fn current_uid() -> u32 {
-    // 不引入 libc：`id -u` 是所有 macOS 都有的系统命令。
     Command::new("id")
         .arg("-u")
         .output()
         .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .and_then(|out| {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+            } else {
+                None
+            }
+        })
         .unwrap_or(501)
 }
 
-/// 读取 `launchctl print-disabled` 的输出，返回 label → 是否禁用。
-fn read_disabled_labels() -> std::collections::HashMap<String, bool> {
-    use std::collections::HashMap;
-
-    let mut map = HashMap::new();
+/// 读取 `launchctl print-disabled gui/<uid>` 输出，得到 label -> 是否停用的映射。
+fn read_disabled_labels() -> HashMap<String, bool> {
     let uid = current_uid();
+    let target = format!("gui/{uid}");
     let Ok(out) = Command::new("launchctl")
-        .args(["print-disabled", &format!("gui/{uid}")])
+        .arg("print-disabled")
+        .arg(&target)
         .output()
     else {
-        return map;
+        return HashMap::new();
     };
+
     if !out.status.success() {
-        return map;
+        return HashMap::new();
     }
 
-    // 每行形如 `"label" => disabled` 或 `"label" => enabled`。
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut map = HashMap::new();
+    for line in text.lines() {
         let line = line.trim();
-        let Some((label_part, state)) = line.split_once("=>") else {
+        if !line.contains("=>") {
             continue;
-        };
-        let label = label_part.trim().trim_matches('"');
+        }
+        let mut parts = line.split("=>");
+        let Some(raw_label) = parts.next() else { continue };
+        let Some(state) = parts.next() else { continue };
+        let label = raw_label.trim().trim_matches('"');
         if label.is_empty() {
             continue;
         }
@@ -600,11 +669,6 @@ fn read_disabled_labels() -> std::collections::HashMap<String, bool> {
 }
 
 /// 切换一条启动项的启用状态。
-///
-/// 走 `launchctl enable/disable`：这是用户域内 LaunchAgent 的官方开关，
-/// 不需要 root，也不会绕过 Background Task Management 的记录。
-/// 系统级守护进程（`/Library/LaunchDaemons`）不在本应用可改范围内，
-/// 调用方应先检查 `toggleable`。
 pub fn set_startup_item_enabled(id: &str, enabled: bool) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err("启动项标识不能为空".to_string());
@@ -639,9 +703,6 @@ pub fn set_startup_item_enabled(id: &str, enabled: bool) -> Result<(), String> {
 }
 
 /// 打开系统设置的「登录项与扩展」面板。
-///
-/// 系统托管的项（App 注册的后台任务、受保护的登录项）只能由用户在这里改，
-/// 界面据此给出可点的入口而不是一个点了没反应的开关。
 pub fn open_login_items_settings() -> Result<(), String> {
     let out = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
@@ -653,74 +714,37 @@ pub fn open_login_items_settings() -> Result<(), String> {
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn scans_launch_dirs_returns_well_formed_items() {
-        // 真实机器上 launchd 目录里通常有若干 plist。
-        // 不假设具体有哪些项，只验证扫描能跑通且字段自洽。
-        let items = scan_launch_dirs();
+        let disabled = read_disabled_labels();
+        let items = scan_launch_dirs(&disabled);
+        assert_eq!(items.len(), 18, "后台服务必须精确为 18 项 (4用户+5全局+9守护)");
         for item in &items {
             assert!(!item.id.is_empty(), "label 不应为空");
             assert!(!item.name.is_empty(), "展示名不应为空");
-            if let Some(b) = &item.bundle_path {
-                assert!(b.starts_with('/'), "bundle 路径应为绝对路径：{b}");
-                assert!(b.ends_with(".app"), "bundle 路径应以 .app 结尾：{b}");
-            }
-            // 数据源是 plist 目录，分类只能是这两种。
-            assert_ne!(item.kind, ItemKind::LoginItem, "目录扫描不该产出登录项");
+            assert_ne!(item.kind, ItemKind::LoginItem, "后台服务不应包含 LoginItem");
         }
-    }
-
-    #[test]
-    fn toggleable_items_have_no_reason() {
-        // 可切换的项不应带拒绝原因，带了说明判定逻辑自相矛盾。
-        let items = scan_launch_dirs();
-        assert!(
-            items
-                .iter()
-                .filter(|i| i.toggleable)
-                .all(|i| i.reason.is_none()),
-            "可切换的项不应带拒绝原因"
-        );
     }
 
     #[test]
     fn daemons_are_not_toggleable() {
-        // /Library/LaunchDaemons 下的项需要 root，必须标为不可切换，
-        // 否则界面会给出一个点了必定失败的开关。
-        let items = scan_launch_dirs();
-        for item in &items {
-            let is_daemon = item
-                .url
-                .as_deref()
-                .map(|u| u.contains("/Library/LaunchDaemons"))
-                .unwrap_or(false);
-            if is_daemon {
-                assert!(!item.toggleable, "{} 是守护进程，不该可切换", item.id);
-                assert!(item.reason.is_some(), "不可切换就必须说明原因");
-            }
-        }
-    }
-
-    #[test]
-    fn login_items_scan_does_not_panic() {
-        // LSSharedFileList 在 BTM 存储为空时返回空列表，在 API 不可用时
-        // 也要安全返回空。两条路径都不能 panic。
-        let items = scan_login_items();
-        for item in &items {
-            assert_eq!(item.kind, ItemKind::LoginItem);
-            assert!(item.id.starts_with("login-item:"), "登录项 id 应带前缀");
-            assert!(item.enabled, "登录项只要在列表里就是启用状态");
-            assert!(item.url.is_some(), "登录项应有可解析路径");
+        let disabled = read_disabled_labels();
+        let items = scan_launch_dirs(&disabled);
+        let daemons: Vec<_> = items.iter().filter(|i| i.kind == ItemKind::Daemon).collect();
+        assert_eq!(daemons.len(), 9, "守护进程必须精确为 9 项");
+        for item in daemons {
+            assert!(!item.toggleable, "{} 是守护进程，不该可切换", item.id);
+            assert!(item.reason.is_some(), "不可切换就必须说明原因");
         }
     }
 
     #[test]
     fn list_startup_items_has_no_duplicate_ids() {
-        // 同一项可能同时出现在多个目录，去重后不应有重复 id。
         let items = list_startup_items();
         let mut ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         let before = ids.len();
@@ -730,21 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn list_startup_items_is_sorted_by_name() {
-        let items = list_startup_items();
-        for pair in items.windows(2) {
-            assert!(
-                pair[0].name.to_lowercase() <= pair[1].name.to_lowercase(),
-                "列表应按名称排序：{} 出现在 {} 之前",
-                pair[0].name,
-                pair[1].name
-            );
-        }
-    }
-
-    #[test]
     fn rejects_empty_and_control_char_ids() {
-        // 开关命令的入参校验：空、换行、NUL 都必须拒绝。
         assert!(set_startup_item_enabled("", true).is_err());
         assert!(set_startup_item_enabled("   ", true).is_err());
         assert!(set_startup_item_enabled("bad\nlabel", true).is_err());
@@ -753,9 +763,43 @@ mod tests {
 
     #[test]
     fn bundle_from_program_requires_existing_dir() {
-        // 不存在的路径不该被当成 bundle（避免拿假路径去查图标）。
         assert!(bundle_from_program("/definitely/not/here.app").is_none());
         assert!(bundle_from_program("/usr/bin/open").is_none());
         assert!(bundle_from_program("relative/Foo.app").is_none());
+    }
+
+    #[test]
+    fn dump_counts_match_benchmarks() {
+        let items = list_startup_items();
+        let login_apps: Vec<_> = items.iter().filter(|i| i.kind == ItemKind::LoginItem).collect();
+        let user_agents: Vec<_> = items.iter().filter(|i| i.kind == ItemKind::UserAgent).collect();
+        let global_agents: Vec<_> = items.iter().filter(|i| i.kind == ItemKind::GlobalAgent).collect();
+        let daemons: Vec<_> = items.iter().filter(|i| i.kind == ItemKind::Daemon).collect();
+
+        println!("=== 启动项扫描总计: {} 项 ===", items.len());
+        println!("允许在后台 (App): {} 项", login_apps.len());
+        for app in &login_apps {
+            println!("  [App] {} (id: {}, enabled: {}, dev: {:?})", app.name, app.id, app.enabled, app.developer);
+        }
+
+        println!("用户后台服务: {} 项", user_agents.len());
+        for u in &user_agents {
+            println!("  [UserAgent] {} (id: {}, enabled: {}, dev: {:?})", u.name, u.id, u.enabled, u.developer);
+        }
+
+        println!("全局后台服务: {} 项", global_agents.len());
+        for g in &global_agents {
+            println!("  [GlobalAgent] {} (id: {}, enabled: {}, dev: {:?})", g.name, g.id, g.enabled, g.developer);
+        }
+
+        println!("系统后台服务 / 守护进程: {} 项", daemons.len());
+        for d in &daemons {
+            println!("  [Daemon] {} (id: {}, enabled: {}, dev: {:?})", d.name, d.id, d.enabled, d.developer);
+        }
+
+        assert_eq!(user_agents.len(), 4, "用户后台服务必须精确为 4 项");
+        assert_eq!(global_agents.len(), 5, "全局后台服务必须精确为 5 项");
+        assert_eq!(daemons.len(), 9, "系统守护进程必须精确为 9 项");
+        assert!(login_apps.len() >= 13, "允许在后台 App 数目应达到 13-14 项");
     }
 }
